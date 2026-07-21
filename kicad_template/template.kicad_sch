@@ -1,0 +1,21 @@
+(kicad_sch (version 20230121) (generator eeschema)
+
+  (paper "A4")
+
+  (title_block
+    (title "KiCad Template Schematic")
+    (date "")
+    (rev "1.0")
+    (company "")
+  )
+
+  (lib_symbols
+  )
+
+  (no_connect (at 0 0) (uuid "00000000-0000-0000-0000-000000000001"))
+
+  (sheet_instances
+    (path "/" (page "1"))
+  )
+
+)
