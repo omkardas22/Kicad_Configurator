@@ -40,3 +40,6 @@ releases/*/web_installer/*.exe
 
 # Logs
 *.log
+
+# Auto-exclude: GitHub push script
+push_to_github.py

@@ -54,16 +54,14 @@ CompressionThreads=auto
 
 ; Installer appearance
 WizardStyle=modern
-WizardImageFile=compiler:WizModernImage-IS.bmp
-WizardSmallImageFile=compiler:WizModernSmallImage-IS.bmp
 SetupIconFile=
 UninstallDisplayIcon={app}\{#AppName}.exe
 
 ; Privileges & architecture
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 
 ; Misc
 AllowNoIcons=yes
@@ -159,8 +157,7 @@ begin
   // Note: User config in %APPDATA%\KiCadConfigurator is intentionally
   // preserved on uninstall to protect saved API keys and output paths.
   MsgBox(
-    'This will remove KiCad Constraint Configurator from your computer.' + #13#10 +
-    #13#10 +
+    'This will remove KiCad Constraint Configurator from your computer.' + #13#10 + #13#10 +
     'Your saved configuration (API key, settings) in %APPDATA%\KiCadConfigurator' + #13#10 +
     'will NOT be deleted. Remove that folder manually if desired.',
     mbInformation, MB_OK

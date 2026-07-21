@@ -28,6 +28,9 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+# Force UTF-8 output on Windows consoles (avoids cp1252 UnicodeEncodeError)
+os.environ["PYTHONUTF8"] = "1"
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -64,7 +67,12 @@ RESET = "\033[0m"
 
 
 def log(msg: str, colour: str = "") -> None:
-    print(f"{colour}{msg}{RESET}" if colour else msg, flush=True)
+    try:
+        print(f"{colour}{msg}{RESET}" if colour else msg, flush=True)
+    except UnicodeEncodeError:
+        # Fallback: strip non-ASCII for terminals that can't handle Unicode
+        safe = msg.encode("ascii", errors="replace").decode("ascii")
+        print(f"{colour}{safe}{RESET}" if colour else safe, flush=True)
 
 
 def log_step(step: str, total: int, current: int, msg: str) -> None:
@@ -73,15 +81,15 @@ def log_step(step: str, total: int, current: int, msg: str) -> None:
 
 
 def log_ok(msg: str) -> None:
-    log(f"  ✅  {msg}", GREEN)
+    log(f"  [OK]  {msg}", GREEN)
 
 
 def log_warn(msg: str) -> None:
-    log(f"  ⚠️   {msg}", YELLOW)
+    log(f"  [WARN] {msg}", YELLOW)
 
 
 def log_err(msg: str) -> None:
-    log(f"  ❌  {msg}", RED)
+    log(f"  [FAIL] {msg}", RED)
 
 
 def run(cmd: list[str], cwd: Optional[Path] = None, check: bool = True) -> int:
@@ -124,7 +132,8 @@ def step_pyinstaller(root: Path, version: str, dry_run: bool) -> Path:
         f"--distpath={dist_path}",
         f"--workpath={build_path}",
         f"--specpath={build_path}",
-        f"--add-data={TEMPLATE_DIR}{os.pathsep}{TEMPLATE_DIR}",
+        f"--add-data={root / TEMPLATE_DIR}{os.pathsep}{TEMPLATE_DIR}",
+        "--noconfirm",
         "--clean",
         str(root / ENTRY_SCRIPT),
     ]

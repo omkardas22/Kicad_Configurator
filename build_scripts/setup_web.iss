@@ -63,8 +63,8 @@ UninstallDisplayIcon={app}\{#AppName}.exe
 ; Privileges & architecture
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 
 AllowNoIcons=yes
 
@@ -157,8 +157,7 @@ begin
   begin
     MsgBox(
       'Cannot reach github.com.' + #13#10 +
-      'A working internet connection is required to download the application.' + #13#10 +
-      #13#10 +
+      'A working internet connection is required to download the application.' + #13#10 + #13#10 +
       'Please check your network and try again, or use the Offline installer.',
       mbError, MB_OK
     );
@@ -187,8 +186,7 @@ begin
       begin
         MsgBox(
           'Failed to download the application payload.' + #13#10 +
-          'URL: ' + PayloadURL + #13#10 +
-          #13#10 +
+          'URL: ' + PayloadURL + #13#10 + #13#10 +
           GetExceptionMessage,
           mbError, MB_OK
         );
@@ -256,8 +254,7 @@ function InitializeUninstall(): Boolean;
 begin
   Result := True;
   MsgBox(
-    'This will remove KiCad Constraint Configurator from your computer.' + #13#10 +
-    #13#10 +
+    'This will remove KiCad Constraint Configurator from your computer.' + #13#10 + #13#10 +
     'Your saved configuration (API key, settings) in %APPDATA%\KiCadConfigurator' + #13#10 +
     'will NOT be deleted. Remove that folder manually if desired.',
     mbInformation, MB_OK
