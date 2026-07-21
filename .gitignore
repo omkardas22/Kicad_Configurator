@@ -36,6 +36,3 @@ src/config.json
 
 # Logs
 *.log
-
-# Auto-exclude: GitHub push script
-push_to_github.py
