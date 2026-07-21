@@ -57,7 +57,7 @@ SolidCompression=yes
 
 ; Installer appearance
 WizardStyle=modern
-SetupIconFile=
+SetupIconFile={#RootDir}\app_icon.ico
 UninstallDisplayIcon={app}\{#AppName}.exe
 
 ; Privileges & architecture

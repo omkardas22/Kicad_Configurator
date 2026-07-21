@@ -385,6 +385,11 @@ class KiCadConfiguratorApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
         self.configure(fg_color=CLR_BG)
 
+        try:
+            self.iconbitmap(get_resource_path("app_icon.ico"))
+        except Exception:
+            pass
+
         self._config: dict = load_config()
         self._constraints: Optional[PCBConstraints] = None
         self._scraping = False

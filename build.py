@@ -133,6 +133,8 @@ def step_pyinstaller(root: Path, version: str, dry_run: bool) -> Path:
         f"--workpath={build_path}",
         f"--specpath={build_path}",
         f"--add-data={root / TEMPLATE_DIR}{os.pathsep}{TEMPLATE_DIR}",
+        f"--add-data={root / 'app_icon.ico'}{os.pathsep}.",
+        f"--icon={root / 'app_icon.ico'}",
         "--noconfirm",
         "--clean",
         str(root / ENTRY_SCRIPT),
