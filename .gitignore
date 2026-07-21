@@ -34,10 +34,6 @@ desktop.ini
 # (DO NOT commit API keys)
 src/config.json
 
-# Release binaries (tracked only for web payload)
-releases/*/standalone_installer/*.exe
-releases/*/web_installer/*.exe
-
 # Logs
 *.log
 

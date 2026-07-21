@@ -10,7 +10,7 @@
 
 **Automatically extract PCB manufacturing constraints from vendor pages using Google Gemini AI and inject them directly into your KiCad project files.**
 
-[Download Offline Installer](https://github.com/omkardas22/Kicad_Configurator/releases) · [Download Web Installer](https://github.com/omkardas22/Kicad_Configurator/releases) · [Report Bug](https://github.com/omkardas22/Kicad_Configurator/issues) · [Request Feature](https://github.com/omkardas22/Kicad_Configurator/issues)
+[Download Offline Installer](https://github.com/omkardas22/Kicad_Configurator/raw/main/releases/v1.0.0/standalone_installer/KiCadConfigurator_FullSetup_v1.0.0.exe) · [Download Web Installer](https://github.com/omkardas22/Kicad_Configurator/raw/main/releases/v1.0.0/web_installer/KiCadConfigurator_WebSetup_v1.0.0.exe) · [Report Bug](https://github.com/omkardas22/Kicad_Configurator/issues) · [Request Feature](https://github.com/omkardas22/Kicad_Configurator/issues)
 
 </div>
 
@@ -47,10 +47,10 @@ KiCad Constraint Configurator eliminates the manual, error-prone process of read
 ## 🚀 Installation
 
 ### Option 1: Offline Installer (Recommended)
-Download `KiCadConfigurator_FullSetup_v1.0.0.exe` from the [Releases](https://github.com/omkardas22/Kicad_Configurator/releases) page. No internet required after download.
+Download [`KiCadConfigurator_FullSetup_v1.0.0.exe`](https://github.com/omkardas22/Kicad_Configurator/raw/main/releases/v1.0.0/standalone_installer/KiCadConfigurator_FullSetup_v1.0.0.exe) — a self-contained installer. No internet required after download.
 
 ### Option 2: Web Installer
-Download `KiCadConfigurator_WebSetup_v1.0.0.exe` — a lightweight stub (~2 MB) that downloads the application from GitHub during installation.
+Download [`KiCadConfigurator_WebSetup_v1.0.0.exe`](https://github.com/omkardas22/Kicad_Configurator/raw/main/releases/v1.0.0/web_installer/KiCadConfigurator_WebSetup_v1.0.0.exe) — a lightweight stub (~2 MB) that downloads the application from GitHub during installation.
 
 ### Option 3: Run from Source
 ```bash
