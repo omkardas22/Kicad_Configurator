@@ -89,6 +89,12 @@ Name: "startmenuicon"; Description: "Create Start Menu shortcut"; GroupDescripti
 ; The actual application is downloaded during installation via [Code]
 
 ; ---------------------------------------------------------------------------
+; [UninstallDelete] section — removes entire installation folder tree
+; ---------------------------------------------------------------------------
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"
+
+; ---------------------------------------------------------------------------
 ; [Icons] section
 ; ---------------------------------------------------------------------------
 [Icons]
@@ -251,12 +257,32 @@ end;
 
 // ── InitializeUninstall ──────────────────────────────────────────────────────
 function InitializeUninstall(): Boolean;
+var
+  AppDataPath: string;
+  DeleteConfig: Integer;
 begin
   Result := True;
+
   MsgBox(
-    'This will remove KiCad Constraint Configurator from your computer.' + #13#10 + #13#10 +
-    'Your saved configuration (API key, settings) in %APPDATA%\KiCadConfigurator' + #13#10 +
-    'will NOT be deleted. Remove that folder manually if desired.',
+    'This will completely remove KiCad Constraint Configurator from your computer.' + #13#10 +
+    'The installation folder and all application files will be deleted.',
     mbInformation, MB_OK
   );
+
+  // Offer to delete saved config / API keys in %APPDATA%
+  AppDataPath := ExpandConstant('{userappdata}\KiCadConfigurator');
+  if DirExists(AppDataPath) then
+  begin
+    DeleteConfig := MsgBox(
+      'Would you also like to delete your saved settings and API keys?' + #13#10 +
+      '  Folder: ' + AppDataPath + #13#10 + #13#10 +
+      'Click YES to permanently delete saved keys and config.' + #13#10 +
+      'Click NO  to keep your settings (you can re-use them later).',
+      mbConfirmation, MB_YESNO
+    );
+    if DeleteConfig = IDYES then
+    begin
+      DelTree(AppDataPath, True, True, True);
+    end;
+  end;
 end;

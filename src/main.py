@@ -1,13 +1,15 @@
 """
 KiCad Constraint Configurator
 Author: KiCad Constraint Configurator Team
-Version: 1.0.0
+Version: 1.1.0
 
 Main application file. Provides a CustomTkinter GUI for:
-  - Entering a Gemini API key (stored in %APPDATA%/KiCadConfigurator/config.json)
+  - Selecting an AI provider (Google Gemini, OpenAI, Anthropic, OpenRouter)
+  - Entering a per-provider API key (stored in %APPDATA%/KiCadConfigurator/config.json)
+  - Fetching available models from the provider with smart recommendations
   - Specifying a vendor URL (PCBWay, JLCPCB, etc.)
   - Scraping vendor capability pages with requests + BeautifulSoup
-  - Extracting PCB constraints via Gemini 2.5 Flash (structured output / Pydantic)
+  - Extracting PCB constraints via AI structured output / Pydantic
   - Injecting extracted constraints into .kicad_pro (JSON) and .kicad_pcb (S-expression)
 """
 
@@ -54,35 +56,105 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_NAME = "KiCad Constraint Configurator"
-APP_VERSION = "1.0.0"
+APP_NAME    = "KiCad Constraint Configurator"
+APP_VERSION = "1.1.0"
 APPDATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "KiCadConfigurator"
 CONFIG_FILE = APPDATA_DIR / "config.json"
-GEMINI_MODEL = "gemini-2.5-flash"
 
 # Colour palette
-CLR_BG = "#0f1117"
-CLR_PANEL = "#1a1d27"
-CLR_ACCENT = "#5865f2"
+CLR_BG      = "#0f1117"
+CLR_PANEL   = "#1a1d27"
+CLR_ACCENT  = "#5865f2"
 CLR_ACCENT2 = "#7289da"
 CLR_SUCCESS = "#43b581"
 CLR_WARNING = "#faa61a"
-CLR_ERROR = "#ed4245"
-CLR_TEXT = "#dcddde"
+CLR_ERROR   = "#ed4245"
+CLR_TEXT    = "#dcddde"
 CLR_SUBTEXT = "#72767d"
-CLR_BORDER = "#2f3136"
+CLR_BORDER  = "#2f3136"
+CLR_CARD    = "#1e2130"
 
-# Net-class defaults (applied on top of extracted minimums)
+# Net-class defaults
 POWER_MULTIPLIER = 2.0
-POWER_COLOR = "rgba(228,26,28,0.8)"
-CANBUS_COLOR = "rgba(55,126,184,0.8)"
+POWER_COLOR      = "rgba(228,26,28,0.8)"
+CANBUS_COLOR     = "rgba(55,126,184,0.8)"
 
 NETCLASS_PATTERNS = [
-    {"netclass": "Power", "pattern": "+*"},
-    {"netclass": "Power", "pattern": "GND*"},
-    {"netclass": "Power", "pattern": "VCC*"},
+    {"netclass": "Power",   "pattern": "+*"},
+    {"netclass": "Power",   "pattern": "GND*"},
+    {"netclass": "Power",   "pattern": "VCC*"},
     {"netclass": "CAN_Bus", "pattern": "CAN_*"},
 ]
+
+# ---------------------------------------------------------------------------
+# AI Provider definitions
+# ---------------------------------------------------------------------------
+
+# Each provider entry:
+#   id          : internal key
+#   label       : display name
+#   placeholder : API key hint
+#   recommended : preferred model IDs in priority order
+#   static_models : fallback list when no API is available (Anthropic, etc.)
+AI_PROVIDERS = [
+    {
+        "id":          "google",
+        "label":       "Google Gemini",
+        "placeholder": "AIza…",
+        "recommended": [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-preview-05-20",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+        ],
+        "static_models": [],
+    },
+    {
+        "id":          "openai",
+        "label":       "OpenAI",
+        "placeholder": "sk-…",
+        "recommended": [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+        ],
+        "static_models": [],
+    },
+    {
+        "id":          "anthropic",
+        "label":       "Anthropic Claude",
+        "placeholder": "sk-ant-…",
+        "recommended": [
+            "claude-3-5-haiku-20241022",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-haiku-20240307",
+            "claude-opus-4-5",
+        ],
+        "static_models": [
+            "claude-3-5-haiku-20241022",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-haiku-20240307",
+            "claude-3-sonnet-20240229",
+            "claude-opus-4-5",
+        ],
+    },
+    {
+        "id":          "openrouter",
+        "label":       "OpenRouter",
+        "placeholder": "sk-or-…",
+        "recommended": [
+            "google/gemini-2.0-flash-exp:free",
+            "openai/gpt-4o-mini",
+            "anthropic/claude-3-haiku",
+            "google/gemini-flash-1.5",
+        ],
+        "static_models": [],
+    },
+]
+
+PROVIDER_MAP = {p["id"]: p for p in AI_PROVIDERS}
 
 
 # ---------------------------------------------------------------------------
@@ -118,48 +190,21 @@ def save_config(cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pydantic schema for Gemini structured output
+# Pydantic schema for structured AI output
 # ---------------------------------------------------------------------------
 if _PYDANTIC_OK:
     class PCBConstraints(BaseModel):
         """Structured PCB manufacturing constraint data extracted from a vendor page."""
 
-        min_trace_width_mm: float = Field(
-            default=0.1,
-            description="Minimum copper trace width in mm",
-        )
-        min_clearance_mm: float = Field(
-            default=0.1,
-            description="Minimum copper-to-copper clearance in mm",
-        )
-        min_via_diameter_mm: float = Field(
-            default=0.6,
-            description="Minimum via outer diameter in mm",
-        )
-        min_via_drill_mm: float = Field(
-            default=0.3,
-            description="Minimum via drill hole diameter in mm",
-        )
-        min_hole_diameter_mm: float = Field(
-            default=0.3,
-            description="Minimum mechanical drill hole diameter in mm",
-        )
-        min_annular_ring_mm: float = Field(
-            default=0.1,
-            description="Minimum pad annular ring width in mm",
-        )
-        vendor_name: str = Field(
-            default="Unknown Vendor",
-            description="Name of the PCB manufacturer",
-        )
-        source_url: str = Field(
-            default="",
-            description="URL where constraints were scraped from",
-        )
-        notes: str = Field(
-            default="",
-            description="Any extra relevant notes from the vendor page",
-        )
+        min_trace_width_mm:  float = Field(default=0.1,  description="Minimum copper trace width in mm")
+        min_clearance_mm:    float = Field(default=0.1,  description="Minimum copper-to-copper clearance in mm")
+        min_via_diameter_mm: float = Field(default=0.6,  description="Minimum via outer diameter in mm")
+        min_via_drill_mm:    float = Field(default=0.3,  description="Minimum via drill hole diameter in mm")
+        min_hole_diameter_mm:float = Field(default=0.3,  description="Minimum mechanical drill hole diameter in mm")
+        min_annular_ring_mm: float = Field(default=0.1,  description="Minimum pad annular ring width in mm")
+        vendor_name:         str   = Field(default="Unknown Vendor", description="Name of the PCB manufacturer")
+        source_url:          str   = Field(default="",   description="URL where constraints were scraped from")
+        notes:               str   = Field(default="",   description="Any extra relevant notes from the vendor page")
 else:
     class PCBConstraints:  # type: ignore[no-redef]
         """Fallback when Pydantic is unavailable."""
@@ -186,45 +231,131 @@ def scrape_vendor_page(url: str, timeout: int = 15) -> str:
     resp = requests.get(url, headers=headers, timeout=timeout)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    # Remove nav / script / style noise
     for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
         tag.decompose()
-    # Grab main content if possible, otherwise full body
     main = soup.find("main") or soup.find("article") or soup.body
     text = main.get_text(separator="\n") if main else soup.get_text(separator="\n")
-    # Collapse excessive whitespace
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return "\n".join(lines)[:12000]  # cap at 12k chars for Gemini context
+    return "\n".join(lines)[:12000]
 
 
 # ---------------------------------------------------------------------------
-# Gemini extractor
+# Model fetcher — provider-specific
 # ---------------------------------------------------------------------------
-def extract_constraints_gemini(api_key: str, raw_text: str, source_url: str) -> PCBConstraints:
-    """Call Gemini 2.5 Flash with structured output to extract PCB constraints."""
+
+def fetch_models_google(api_key: str) -> list[str]:
+    """Fetch available Gemini models via the REST API."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=100"
+    resp = requests.get(url, timeout=12)
+    resp.raise_for_status()
+    data = resp.json()
+    models = []
+    for m in data.get("models", []):
+        name = m.get("name", "")
+        # Strip the "models/" prefix
+        if name.startswith("models/"):
+            name = name[len("models/"):]
+        # Only include models that support generateContent
+        supported = [a.get("name") for a in m.get("supportedGenerationMethods", [])]
+        if "generateContent" in supported:
+            models.append(name)
+    return sorted(models)
+
+
+def fetch_models_openai(api_key: str) -> list[str]:
+    """Fetch available OpenAI models."""
+    resp = requests.get(
+        "https://api.openai.com/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=12,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    ids = [m["id"] for m in data.get("data", [])]
+    # Filter to useful chat/text completion models
+    useful = [m for m in ids if any(k in m for k in ("gpt-4", "gpt-3.5", "o1", "o3"))]
+    return sorted(useful)
+
+
+def fetch_models_anthropic(_api_key: str) -> list[str]:
+    """Return Anthropic's static model list (no public list endpoint)."""
+    return PROVIDER_MAP["anthropic"]["static_models"][:]
+
+
+def fetch_models_openrouter(api_key: str) -> list[str]:
+    """Fetch available OpenRouter models."""
+    resp = requests.get(
+        "https://openrouter.ai/api/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return sorted([m["id"] for m in data.get("data", [])])
+
+
+FETCH_MODELS_FN = {
+    "google":     fetch_models_google,
+    "openai":     fetch_models_openai,
+    "anthropic":  fetch_models_anthropic,
+    "openrouter": fetch_models_openrouter,
+}
+
+
+# ---------------------------------------------------------------------------
+# AI extraction adapters — one per provider
+# ---------------------------------------------------------------------------
+
+EXTRACTION_PROMPT_TEMPLATE = textwrap.dedent("""\
+    You are an expert PCB manufacturing engineer.
+    Below is raw text scraped from a PCB vendor capability page at: {source_url}
+
+    Extract the minimum PCB design constraints as numeric values in millimeters.
+    If a value is given in mils or inches, convert to mm (1 mil = 0.0254 mm, 1 inch = 25.4 mm).
+    Return ONLY valid JSON matching this exact schema:
+    {{
+      "min_trace_width_mm":   <float>,
+      "min_clearance_mm":     <float>,
+      "min_via_diameter_mm":  <float>,
+      "min_via_drill_mm":     <float>,
+      "min_hole_diameter_mm": <float>,
+      "min_annular_ring_mm":  <float>,
+      "vendor_name":          "<string>",
+      "source_url":           "<string>",
+      "notes":                "<string>"
+    }}
+    Use conservative (larger) defaults when data is ambiguous or missing.
+
+    --- BEGIN VENDOR TEXT ---
+    {raw_text}
+    --- END VENDOR TEXT ---
+""")
+
+
+def _parse_json_response(text: str) -> dict:
+    """Extract JSON from a possibly markdown-fenced response."""
+    # Strip ```json ... ``` fences
+    text = text.strip()
+    fence = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
+    if fence:
+        text = fence.group(1).strip()
+    return json.loads(text)
+
+
+def extract_constraints_google(api_key: str, model: str, raw_text: str, source_url: str) -> PCBConstraints:
+    """Call Google Gemini with structured output to extract PCB constraints."""
     if not _GENAI_OK:
-        raise RuntimeError("google-genai not installed.")
+        raise RuntimeError(
+            "google-genai package not installed. Run: pip install google-genai"
+        )
     if not _PYDANTIC_OK:
         raise RuntimeError("pydantic not installed.")
 
     client = genai.Client(api_key=api_key)
-
-    prompt = textwrap.dedent(f"""\
-        You are an expert PCB manufacturing engineer.
-        Below is raw text scraped from a PCB vendor capability page at: {source_url}
-
-        Extract the minimum PCB design constraints as numeric values in millimeters.
-        If a value is given in mils or inches, convert to mm (1 mil = 0.0254 mm, 1 inch = 25.4 mm).
-        Return ONLY the structured JSON matching the schema.
-        Use conservative (larger) defaults when data is ambiguous or missing.
-
-        --- BEGIN VENDOR TEXT ---
-        {raw_text}
-        --- END VENDOR TEXT ---
-    """)
+    prompt = EXTRACTION_PROMPT_TEMPLATE.format(raw_text=raw_text, source_url=source_url)
 
     response = client.models.generate_content(
-        model=GEMINI_MODEL,
+        model=model,
         contents=prompt,
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -232,10 +363,99 @@ def extract_constraints_gemini(api_key: str, raw_text: str, source_url: str) -> 
             temperature=0.1,
         ),
     )
-    # Parse the structured response
     data = json.loads(response.text)
     data["source_url"] = source_url
     return PCBConstraints(**data)
+
+
+def extract_constraints_openai(api_key: str, model: str, raw_text: str, source_url: str) -> PCBConstraints:
+    """Call OpenAI chat completions API (pure requests) to extract PCB constraints."""
+    prompt = EXTRACTION_PROMPT_TEMPLATE.format(raw_text=raw_text, source_url=source_url)
+    payload = {
+        "model": model,
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": "You are an expert PCB manufacturing engineer. Return only valid JSON."},
+            {"role": "user",   "content": prompt},
+        ],
+    }
+    resp = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    data = _parse_json_response(content)
+    data["source_url"] = source_url
+    return PCBConstraints(**data)
+
+
+def extract_constraints_anthropic(api_key: str, model: str, raw_text: str, source_url: str) -> PCBConstraints:
+    """Call Anthropic Messages API (pure requests) to extract PCB constraints."""
+    prompt = EXTRACTION_PROMPT_TEMPLATE.format(raw_text=raw_text, source_url=source_url)
+    payload = {
+        "model":      model,
+        "max_tokens": 1024,
+        "messages":   [{"role": "user", "content": prompt}],
+    }
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key":         api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type":      "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    content = resp.json()["content"][0]["text"]
+    data = _parse_json_response(content)
+    data["source_url"] = source_url
+    return PCBConstraints(**data)
+
+
+def extract_constraints_openrouter(api_key: str, model: str, raw_text: str, source_url: str) -> PCBConstraints:
+    """Call OpenRouter's OpenAI-compatible endpoint to extract PCB constraints."""
+    prompt = EXTRACTION_PROMPT_TEMPLATE.format(raw_text=raw_text, source_url=source_url)
+    payload = {
+        "model":      model,
+        "temperature": 0.1,
+        "messages": [
+            {"role": "system", "content": "You are an expert PCB manufacturing engineer. Return only valid JSON."},
+            {"role": "user",   "content": prompt},
+        ],
+    }
+    resp = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+            "HTTP-Referer":  "https://github.com/omkardas22/Kicad_Configurator",
+            "X-Title":       "KiCad Constraint Configurator",
+        },
+        json=payload,
+        timeout=90,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    data = _parse_json_response(content)
+    data["source_url"] = source_url
+    return PCBConstraints(**data)
+
+
+EXTRACT_FN = {
+    "google":     extract_constraints_google,
+    "openai":     extract_constraints_openai,
+    "anthropic":  extract_constraints_anthropic,
+    "openrouter": extract_constraints_openrouter,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -244,27 +464,27 @@ def extract_constraints_gemini(api_key: str, raw_text: str, source_url: str) -> 
 
 def _build_net_class(name: str, constraints: PCBConstraints, color: str,
                      multiplier: float = 1.0, diff_pair: bool = False) -> dict:
-    track = round(constraints.min_trace_width_mm * multiplier, 4)
-    clr = round(constraints.min_clearance_mm * multiplier, 4)
-    via_d = round(constraints.min_via_diameter_mm, 4)
-    via_dr = round(constraints.min_via_drill_mm, 4)
+    track   = round(constraints.min_trace_width_mm * multiplier, 4)
+    clr     = round(constraints.min_clearance_mm * multiplier, 4)
+    via_d   = round(constraints.min_via_diameter_mm, 4)
+    via_dr  = round(constraints.min_via_drill_mm, 4)
 
     nc: dict = {
-        "bus_width": 12,
-        "clearance": clr,
-        "diff_pair_gap": round(constraints.min_clearance_mm, 4) if diff_pair else 0.25,
-        "diff_pair_via_gap": round(constraints.min_clearance_mm, 4) if diff_pair else 0.25,
-        "diff_pair_width": track if diff_pair else 0.2,
-        "line_style": 0,
-        "microvia_diameter": 0.3,
-        "microvia_drill": 0.1,
-        "name": name,
-        "pcb_color": color,
-        "schematic_color": color,
-        "track_width": track,
-        "via_diameter": via_d,
-        "via_drill": via_dr,
-        "wire_width": 6,
+        "bus_width":          12,
+        "clearance":          clr,
+        "diff_pair_gap":      round(constraints.min_clearance_mm, 4) if diff_pair else 0.25,
+        "diff_pair_via_gap":  round(constraints.min_clearance_mm, 4) if diff_pair else 0.25,
+        "diff_pair_width":    track if diff_pair else 0.2,
+        "line_style":         0,
+        "microvia_diameter":  0.3,
+        "microvia_drill":     0.1,
+        "name":               name,
+        "pcb_color":          color,
+        "schematic_color":    color,
+        "track_width":        track,
+        "via_diameter":       via_d,
+        "via_drill":          via_dr,
+        "wire_width":         6,
     }
     return nc
 
@@ -274,31 +494,23 @@ def inject_kicad_pro(pro_path: Path, constraints: PCBConstraints) -> None:
     with open(pro_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # 1. Update design rule minimums
     rules = data.setdefault("board", {}).setdefault(
         "design_settings", {}
     ).setdefault("rules", {})
-    rules["min_clearance"] = constraints.min_clearance_mm
-    rules["min_track_width"] = constraints.min_trace_width_mm
-    rules["min_via_diameter"] = constraints.min_via_diameter_mm
-    rules["min_via_annular_width"] = constraints.min_annular_ring_mm
+    rules["min_clearance"]          = constraints.min_clearance_mm
+    rules["min_track_width"]        = constraints.min_trace_width_mm
+    rules["min_via_diameter"]       = constraints.min_via_diameter_mm
+    rules["min_via_annular_width"]  = constraints.min_annular_ring_mm
     rules["min_through_hole_diameter"] = constraints.min_hole_diameter_mm
-    rules["min_hole_clearance"] = constraints.min_clearance_mm
-    rules["min_hole_to_hole"] = constraints.min_hole_diameter_mm
+    rules["min_hole_clearance"]     = constraints.min_clearance_mm
+    rules["min_hole_to_hole"]       = constraints.min_hole_diameter_mm
 
-    # 2. Build net classes
-    default_nc = _build_net_class(
-        "Default", constraints, "rgba(0,0,0,0)", multiplier=1.0
-    )
-    power_nc = _build_net_class(
-        "Power", constraints, POWER_COLOR, multiplier=POWER_MULTIPLIER
-    )
-    canbus_nc = _build_net_class(
-        "CAN_Bus", constraints, CANBUS_COLOR, multiplier=1.0, diff_pair=True
-    )
+    default_nc = _build_net_class("Default",  constraints, "rgba(0,0,0,0)", multiplier=1.0)
+    power_nc   = _build_net_class("Power",    constraints, POWER_COLOR,     multiplier=POWER_MULTIPLIER)
+    canbus_nc  = _build_net_class("CAN_Bus",  constraints, CANBUS_COLOR,    multiplier=1.0, diff_pair=True)
 
     net_settings = data.setdefault("net_settings", {})
-    net_settings["classes"] = [default_nc, power_nc, canbus_nc]
+    net_settings["classes"]          = [default_nc, power_nc, canbus_nc]
     net_settings["netclass_patterns"] = copy.deepcopy(NETCLASS_PATTERNS)
 
     with open(pro_path, "w", encoding="utf-8") as f:
@@ -311,13 +523,13 @@ def inject_kicad_pcb(pcb_path: Path, constraints: PCBConstraints) -> None:
         content = f.read()
 
     replacements = {
-        r"\(clearance\s+[\d.]+\)": f"(clearance {constraints.min_clearance_mm})",
-        r"\(track_width\s+[\d.]+\)": f"(track_width {constraints.min_trace_width_mm})",
-        r"\(via_size\s+[\d.]+\)": f"(via_size {constraints.min_via_diameter_mm})",
-        r"\(via_drill\s+[\d.]+\)": f"(via_drill {constraints.min_via_drill_mm})",
-        r"\(via_min_size\s+[\d.]+\)": f"(via_min_size {constraints.min_via_diameter_mm})",
-        r"\(via_min_drill\s+[\d.]+\)": f"(via_min_drill {constraints.min_via_drill_mm})",
-        r"\(hole_to_hole_min\s+[\d.]+\)": f"(hole_to_hole_min {constraints.min_hole_diameter_mm})",
+        r"\(clearance\s+[\d.]+\)":       f"(clearance {constraints.min_clearance_mm})",
+        r"\(track_width\s+[\d.]+\)":     f"(track_width {constraints.min_trace_width_mm})",
+        r"\(via_size\s+[\d.]+\)":        f"(via_size {constraints.min_via_diameter_mm})",
+        r"\(via_drill\s+[\d.]+\)":       f"(via_drill {constraints.min_via_drill_mm})",
+        r"\(via_min_size\s+[\d.]+\)":    f"(via_min_size {constraints.min_via_diameter_mm})",
+        r"\(via_min_drill\s+[\d.]+\)":   f"(via_min_drill {constraints.min_via_drill_mm})",
+        r"\(hole_to_hole_min\s+[\d.]+\)":f"(hole_to_hole_min {constraints.min_hole_diameter_mm})",
     }
 
     for pattern, replacement in replacements.items():
@@ -334,35 +546,27 @@ def run_injection(
     project_name: str,
     log_callback,
 ) -> Path:
-    """
-    Copy templates to output_dir/<project_name>/ and inject constraints.
-    Returns the path to the created project directory.
-    """
+    """Copy templates to output_dir/<project_name>/ and inject constraints."""
     dest = output_dir / project_name
     dest.mkdir(parents=True, exist_ok=True)
-
     log_callback(f"📁 Creating project folder: {dest}")
 
-    # Copy and rename templates
     files = {
         "template.kicad_pro": f"{project_name}.kicad_pro",
         "template.kicad_pcb": f"{project_name}.kicad_pcb",
         "template.kicad_sch": f"{project_name}.kicad_sch",
     }
-
     for src_name, dst_name in files.items():
         src = template_dir / src_name
         dst = dest / dst_name
         shutil.copy2(src, dst)
         log_callback(f"  ✅ Copied {dst_name}")
 
-    # Inject into .kicad_pro
     pro_path = dest / f"{project_name}.kicad_pro"
     log_callback("⚙️  Injecting constraints into .kicad_pro …")
     inject_kicad_pro(pro_path, constraints)
     log_callback("  ✅ .kicad_pro updated (design rules + net classes + patterns)")
 
-    # Inject into .kicad_pcb
     pcb_path = dest / f"{project_name}.kicad_pcb"
     log_callback("⚙️  Injecting constraints into .kicad_pcb …")
     inject_kicad_pcb(pcb_path, constraints)
@@ -379,8 +583,8 @@ class KiCadConfiguratorApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_NAME} v{APP_VERSION}")
-        self.geometry("920x720")
-        self.minsize(800, 620)
+        self.geometry("980x760")
+        self.minsize(860, 660)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.configure(fg_color=CLR_BG)
@@ -390,9 +594,11 @@ class KiCadConfiguratorApp(ctk.CTk):
         except Exception:
             pass
 
-        self._config: dict = load_config()
+        self._config:      dict                    = load_config()
         self._constraints: Optional[PCBConstraints] = None
-        self._scraping = False
+        self._constraints_lock                      = threading.Lock()
+        self._scraping:    bool                     = False
+        self._models_list: list[str]                = []
 
         self._build_ui()
         self._restore_config()
@@ -425,13 +631,11 @@ class KiCadConfiguratorApp(ctk.CTk):
         content = ctk.CTkFrame(self, fg_color=CLR_BG)
         content.pack(fill="both", expand=True, padx=16, pady=12)
 
-        # Left panel (inputs)
         left = ctk.CTkScrollableFrame(
-            content, fg_color=CLR_PANEL, corner_radius=12, width=380
+            content, fg_color=CLR_PANEL, corner_radius=12, width=400
         )
         left.pack(side="left", fill="y", padx=(0, 8))
 
-        # Right panel (log + results)
         right = ctk.CTkFrame(content, fg_color=CLR_PANEL, corner_radius=12)
         right.pack(side="right", fill="both", expand=True)
 
@@ -463,11 +667,33 @@ class KiCadConfiguratorApp(ctk.CTk):
             text_color=CLR_TEXT,
         ).pack(padx=16, pady=(16, 8), anchor="w")
 
+        # ── AI Provider ────────────────────────────────────────────────
+        self._section_label(parent, "🤖  AI Provider")
+        provider_labels = [p["label"] for p in AI_PROVIDERS]
+        self._provider_var = ctk.StringVar(value=provider_labels[0])
+
+        self._provider_menu = ctk.CTkOptionMenu(
+            parent,
+            variable=self._provider_var,
+            values=provider_labels,
+            fg_color=CLR_BG,
+            button_color=CLR_ACCENT,
+            button_hover_color=CLR_ACCENT2,
+            dropdown_fg_color=CLR_CARD,
+            dropdown_hover_color=CLR_BORDER,
+            text_color=CLR_TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            command=self._on_provider_change,
+        )
+        self._provider_menu.pack(fill="x", padx=16, pady=(0, 8))
+
         # ── API Key ────────────────────────────────────────────────────
-        self._section_label(parent, "🔑  Gemini API Key")
+        self._section_label(parent, "🔑  API Key")
         self._api_key_var = ctk.StringVar()
+
         api_row = ctk.CTkFrame(parent, fg_color="transparent")
         api_row.pack(fill="x", padx=16, pady=(0, 4))
+
         self._api_entry = ctk.CTkEntry(
             api_row, textvariable=self._api_key_var,
             placeholder_text="AIza…",
@@ -491,14 +717,65 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._key_status_label.pack(fill="x", padx=16)
 
-        # Toggle visibility
         ctk.CTkButton(
             parent, text="Show / Hide Key", width=130,
             fg_color="transparent", border_width=1, border_color=CLR_BORDER,
             hover_color=CLR_BORDER, text_color=CLR_SUBTEXT,
             font=ctk.CTkFont(family="Segoe UI", size=11),
             command=self._toggle_key_visibility,
-        ).pack(padx=16, pady=(2, 8), anchor="w")
+        ).pack(padx=16, pady=(2, 4), anchor="w")
+
+        # ── Model Selection ────────────────────────────────────────────
+        self._section_label(parent, "🧠  AI Model")
+
+        # Fetch button + connection indicator row
+        fetch_row = ctk.CTkFrame(parent, fg_color="transparent")
+        fetch_row.pack(fill="x", padx=16, pady=(0, 4))
+
+        self._fetch_btn = ctk.CTkButton(
+            fetch_row, text="🔄 Fetch Models", width=130,
+            fg_color=CLR_ACCENT, hover_color=CLR_ACCENT2,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            command=self._fetch_models,
+        )
+        self._fetch_btn.pack(side="left", padx=(0, 8))
+
+        self._conn_status_label = ctk.CTkLabel(
+            fetch_row, text="○ Not connected",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_SUBTEXT,
+        )
+        self._conn_status_label.pack(side="left")
+
+        # Model list frame
+        model_frame = ctk.CTkFrame(parent, fg_color=CLR_BG, corner_radius=8)
+        model_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+        # Scrollable model list implemented as a CTkScrollableFrame with radio-style buttons
+        self._model_scroll = ctk.CTkScrollableFrame(
+            model_frame, fg_color="transparent", height=140
+        )
+        self._model_scroll.pack(fill="x", padx=4, pady=4)
+
+        self._selected_model_var = ctk.StringVar(value="")
+        self._model_radio_buttons: list[ctk.CTkRadioButton] = []
+
+        # Placeholder text
+        self._model_placeholder = ctk.CTkLabel(
+            self._model_scroll,
+            text="← Enter API key and click 'Fetch Models'",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_SUBTEXT,
+        )
+        self._model_placeholder.pack(padx=8, pady=16)
+
+        # Selected model indicator
+        self._selected_model_label = ctk.CTkLabel(
+            parent, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=CLR_ACCENT2, anchor="w",
+        )
+        self._selected_model_label.pack(fill="x", padx=16, pady=(0, 4))
 
         # ── Vendor URL ─────────────────────────────────────────────────
         self._section_label(parent, "🌐  Vendor Capability URL")
@@ -510,7 +787,6 @@ class KiCadConfiguratorApp(ctk.CTk):
             fg_color=CLR_BG, border_color=CLR_BORDER, text_color=CLR_TEXT,
         ).pack(fill="x", padx=16, pady=(0, 4))
 
-        # Quick-fill buttons
         quick_frame = ctk.CTkFrame(parent, fg_color="transparent")
         quick_frame.pack(fill="x", padx=16, pady=(0, 8))
         ctk.CTkLabel(
@@ -518,8 +794,9 @@ class KiCadConfiguratorApp(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=11), text_color=CLR_SUBTEXT,
         ).pack(side="left", padx=(0, 6))
         for label, url in [
-            ("JLCPCB", "https://jlcpcb.com/capabilities/pcb"),
-            ("PCBWay", "https://www.pcbway.com/capabilities.html"),
+            ("JLCPCB",  "https://jlcpcb.com/capabilities/pcb"),
+            ("PCBWay",  "https://www.pcbway.com/capabilities.html"),
+            ("OSHPark", "https://docs.oshpark.com/submitting-designs/drill-specs/"),
         ]:
             ctk.CTkButton(
                 quick_frame, text=label, width=68,
@@ -589,7 +866,6 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._progress.set(0)
 
     def _build_right_panel(self, parent) -> None:
-        # Tabs
         self._tabs = ctk.CTkTabview(
             parent,
             fg_color=CLR_PANEL,
@@ -614,7 +890,6 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._results_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         self._results_frame.pack(fill="both", expand=True)
 
-        # Placeholder label
         self._results_placeholder = ctk.CTkLabel(
             self._results_frame,
             text="No constraints extracted yet.\nRun 'Scrape & Extract' to begin.",
@@ -623,7 +898,6 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._results_placeholder.pack(expand=True, pady=60)
 
-        # Results cards container (hidden until data arrives)
         self._cards_frame = ctk.CTkFrame(self._results_frame, fg_color="transparent")
 
     def _build_log_tab(self, parent) -> None:
@@ -649,18 +923,26 @@ class KiCadConfiguratorApp(ctk.CTk):
         about_frame.pack(fill="both", expand=True)
 
         about_text = (
-            f"**{APP_NAME}** v{APP_VERSION}\n\n"
+            f"{APP_NAME} v{APP_VERSION}\n\n"
             "Automatically extracts PCB manufacturing constraints from vendor\n"
-            "capability pages using AI (Google Gemini 2.5 Flash), then injects\n"
-            "them directly into your KiCad project files.\n\n"
+            "capability pages using AI, then injects them directly into your\n"
+            "KiCad project files.\n\n"
             "──────────────────────────────────────\n"
+            "Supported AI Providers:\n"
+            "  • Google Gemini   (gemini-2.x-flash recommended)\n"
+            "  • OpenAI          (gpt-4o-mini recommended)\n"
+            "  • Anthropic Claude(claude-3-5-haiku recommended)\n"
+            "  • OpenRouter      (many models, free tiers available)\n\n"
             "Features:\n"
+            "  • Multi-provider AI with dynamic model listing\n"
+            "  • Smart model recommendations per provider\n"
+            "  • Per-provider API key storage\n"
             "  • AI-powered constraint extraction\n"
-            "  • Auto net-class configuration (Default / Power / CAN_Bus)\n"
+            "  • Auto net-class config (Default / Power / CAN_Bus)\n"
             "  • .kicad_pro JSON patching (design rules + net classes)\n"
             "  • .kicad_pcb S-expression patching (setup block)\n"
-            "  • API key stored securely in %APPDATA%\n\n"
-            "Supported Vendors:\n"
+            "  • API keys stored securely in %APPDATA%\n\n"
+            "Supported PCB Vendors:\n"
             "  • JLCPCB  •  PCBWay  •  OSH Park  •  Any vendor with a cap page\n\n"
             "──────────────────────────────────────\n"
             "GitHub: https://github.com/omkardas22/Kicad_Configurator\n"
@@ -678,7 +960,6 @@ class KiCadConfiguratorApp(ctk.CTk):
 
     def _render_results(self, c: PCBConstraints) -> None:
         """Render extracted constraint data as visual cards."""
-        # Clear previous
         for widget in self._cards_frame.winfo_children():
             widget.destroy()
         self._results_placeholder.pack_forget()
@@ -696,12 +977,12 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         # Constraint grid
         metrics = [
-            ("Min Trace Width", f"{c.min_trace_width_mm:.4f} mm", "📏"),
-            ("Min Clearance",   f"{c.min_clearance_mm:.4f} mm",   "↔️"),
-            ("Min Via Diameter",f"{c.min_via_diameter_mm:.4f} mm", "⭕"),
-            ("Min Via Drill",   f"{c.min_via_drill_mm:.4f} mm",    "🔩"),
-            ("Min Hole Dia",    f"{c.min_hole_diameter_mm:.4f} mm","🕳️"),
-            ("Min Annular Ring",f"{c.min_annular_ring_mm:.4f} mm", "🔘"),
+            ("Min Trace Width",  f"{c.min_trace_width_mm:.4f} mm",  "📏"),
+            ("Min Clearance",    f"{c.min_clearance_mm:.4f} mm",    "↔️"),
+            ("Min Via Diameter", f"{c.min_via_diameter_mm:.4f} mm", "⭕"),
+            ("Min Via Drill",    f"{c.min_via_drill_mm:.4f} mm",    "🔩"),
+            ("Min Hole Dia",     f"{c.min_hole_diameter_mm:.4f} mm","🕳️"),
+            ("Min Annular Ring", f"{c.min_annular_ring_mm:.4f} mm", "🔘"),
         ]
 
         grid = ctk.CTkFrame(self._cards_frame, fg_color="transparent")
@@ -711,10 +992,7 @@ class KiCadConfiguratorApp(ctk.CTk):
         for i, (label, value, icon) in enumerate(metrics):
             card = ctk.CTkFrame(grid, fg_color=CLR_BG, corner_radius=8)
             card.grid(row=i // 2, column=i % 2, padx=4, pady=4, sticky="nsew")
-            ctk.CTkLabel(
-                card, text=icon,
-                font=ctk.CTkFont(size=20),
-            ).pack(pady=(10, 2))
+            ctk.CTkLabel(card, text=icon, font=ctk.CTkFont(size=20)).pack(pady=(10, 2))
             ctk.CTkLabel(
                 card, text=value,
                 font=ctk.CTkFont(family="Consolas", size=16, weight="bold"),
@@ -726,7 +1004,6 @@ class KiCadConfiguratorApp(ctk.CTk):
                 text_color=CLR_SUBTEXT,
             ).pack(pady=(0, 10))
 
-        # Net class preview
         if c.notes:
             notes_card = ctk.CTkFrame(self._cards_frame, fg_color=CLR_BG, corner_radius=8)
             notes_card.pack(fill="x", pady=(8, 4))
@@ -741,26 +1018,203 @@ class KiCadConfiguratorApp(ctk.CTk):
                 text_color=CLR_SUBTEXT, wraplength=360, justify="left", anchor="nw",
             ).pack(padx=12, pady=(0, 10), anchor="w")
 
-        # Switch to results tab
         self._tabs.set("📊 Results")
+
+    # ------------------------------------------------------------------
+    # Provider / Model helpers
+    # ------------------------------------------------------------------
+
+    def _current_provider_id(self) -> str:
+        label = self._provider_var.get()
+        for p in AI_PROVIDERS:
+            if p["label"] == label:
+                return p["id"]
+        return "google"
+
+    def _on_provider_change(self, _value: str) -> None:
+        """Update API key placeholder and clear the model list when provider changes."""
+        pid = self._current_provider_id()
+        provider = PROVIDER_MAP[pid]
+        self._api_entry.configure(placeholder_text=provider["placeholder"])
+
+        # Restore saved key for this provider
+        saved_keys = self._config.get("api_keys", {})
+        self._api_key_var.set(saved_keys.get(pid, ""))
+
+        # Update key status
+        if saved_keys.get(pid):
+            self._key_status_label.configure(text="✔ Key loaded from config", text_color=CLR_SUCCESS)
+        else:
+            self._key_status_label.configure(text="", text_color=CLR_SUCCESS)
+
+        # Clear model list
+        self._clear_model_list()
+        self._conn_status_label.configure(text="○ Not connected", text_color=CLR_SUBTEXT)
+
+        # If provider has static models, populate immediately
+        if provider["static_models"]:
+            self._populate_model_list(provider["static_models"])
+            self._conn_status_label.configure(
+                text="● Static list loaded", text_color=CLR_WARNING
+            )
+
+    def _clear_model_list(self) -> None:
+        for rb in self._model_radio_buttons:
+            rb.destroy()
+        self._model_radio_buttons.clear()
+        self._model_placeholder.pack(padx=8, pady=16)
+        self._selected_model_label.configure(text="")
+        self._selected_model_var.set("")
+        self._models_list = []
+
+    def _populate_model_list(self, models: list[str]) -> None:
+        """Fill the model scroll frame with radio buttons, marking the recommended one."""
+        self._model_placeholder.pack_forget()
+
+        pid = self._current_provider_id()
+        recommended = PROVIDER_MAP[pid]["recommended"]
+
+        # Determine best recommendation that exists in the fetched list
+        star_model = next((m for m in recommended if m in models), None)
+        if star_model is None and models:
+            star_model = models[0]
+
+        self._models_list = models
+
+        for m in models:
+            is_rec = (m == star_model)
+            label  = f"⭐ {m}  ← Recommended" if is_rec else m
+            color  = CLR_SUCCESS if is_rec else CLR_TEXT
+            rb = ctk.CTkRadioButton(
+                self._model_scroll,
+                text=label,
+                variable=self._selected_model_var,
+                value=m,
+                font=ctk.CTkFont(
+                    family="Segoe UI",
+                    size=11,
+                    weight="bold" if is_rec else "normal",
+                ),
+                text_color=color,
+                fg_color=CLR_ACCENT,
+                hover_color=CLR_ACCENT2,
+                command=self._on_model_select,
+            )
+            rb.pack(anchor="w", padx=8, pady=2)
+            self._model_radio_buttons.append(rb)
+
+        # Auto-select the recommended model
+        if star_model:
+            self._selected_model_var.set(star_model)
+            self._on_model_select()
+
+    def _on_model_select(self) -> None:
+        model = self._selected_model_var.get()
+        if model:
+            self._selected_model_label.configure(
+                text=f"Selected: {model}", text_color=CLR_ACCENT2
+            )
+
+    def _fetch_models(self) -> None:
+        """Background thread: fetch models from the selected provider."""
+        if not _REQUESTS_OK:
+            messagebox.showerror("Missing Dependency", "requests package is not installed.")
+            return
+
+        api_key = self._api_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("No API Key", "Please enter an API key before fetching models.")
+            return
+
+        pid = self._current_provider_id()
+        self._fetch_btn.configure(state="disabled", text="⏳ Fetching…")
+        self._conn_status_label.configure(text="⏳ Connecting…", text_color=CLR_WARNING)
+
+        def _worker():
+            try:
+                models = FETCH_MODELS_FN[pid](api_key)
+                self.after(0, lambda: self._on_models_fetched(models))
+            except Exception as exc:
+                self.after(0, lambda: self._on_models_error(str(exc)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_models_fetched(self, models: list[str]) -> None:
+        self._fetch_btn.configure(state="normal", text="🔄 Fetch Models")
+        if not models:
+            self._conn_status_label.configure(text="⚠ No models found", text_color=CLR_WARNING)
+            return
+        self._conn_status_label.configure(
+            text=f"✅ {len(models)} models available", text_color=CLR_SUCCESS
+        )
+        self._clear_model_list()
+        self._populate_model_list(models)
+
+    def _on_models_error(self, err: str) -> None:
+        self._fetch_btn.configure(state="normal", text="🔄 Fetch Models")
+        self._conn_status_label.configure(
+            text="❌ Connection failed", text_color=CLR_ERROR
+        )
+        messagebox.showerror(
+            "Fetch Models Failed",
+            f"Could not retrieve model list:\n\n{err}\n\n"
+            "Check your API key and internet connection.",
+        )
 
     # ------------------------------------------------------------------
     # Config helpers
     # ------------------------------------------------------------------
 
     def _restore_config(self) -> None:
-        if "api_key" in self._config:
-            self._api_key_var.set(self._config["api_key"])
+        # Provider
+        saved_provider = self._config.get("ai_provider", "google")
+        for p in AI_PROVIDERS:
+            if p["id"] == saved_provider:
+                self._provider_var.set(p["label"])
+                break
+
+        pid = self._current_provider_id()
+        provider = PROVIDER_MAP[pid]
+        self._api_entry.configure(placeholder_text=provider["placeholder"])
+
+        # API key for current provider
+        saved_keys = self._config.get("api_keys", {})
+        # Backward-compat: migrate legacy "api_key" field
+        if "api_key" in self._config and "google" not in saved_keys:
+            saved_keys["google"] = self._config.pop("api_key")
+            self._config["api_keys"] = saved_keys
+
+        key = saved_keys.get(pid, "")
+        if key:
+            self._api_key_var.set(key)
             self._key_status_label.configure(text="✔ Key loaded from config", text_color=CLR_SUCCESS)
+
+        # Output dir
         if "output_dir" in self._config:
             self._output_dir_var.set(self._config["output_dir"])
+
+        # If static-models provider, populate immediately
+        if provider["static_models"]:
+            self._populate_model_list(provider["static_models"])
+            self._conn_status_label.configure(
+                text="● Static list loaded", text_color=CLR_WARNING
+            )
+
+        # Restore previously selected model
+        saved_model = self._config.get("ai_model", "")
+        if saved_model and saved_model in self._models_list:
+            self._selected_model_var.set(saved_model)
+            self._on_model_select()
 
     def _save_api_key(self) -> None:
         key = self._api_key_var.get().strip()
         if not key:
             self._key_status_label.configure(text="⚠ Enter a key first", text_color=CLR_WARNING)
             return
-        self._config["api_key"] = key
+        pid = self._current_provider_id()
+        api_keys = self._config.setdefault("api_keys", {})
+        api_keys[pid] = key
+        self._config["ai_provider"] = pid
         save_config(self._config)
         self._key_status_label.configure(text="✔ Key saved", text_color=CLR_SUCCESS)
 
@@ -803,14 +1257,35 @@ class KiCadConfiguratorApp(ctk.CTk):
     def _start_scrape(self) -> None:
         if self._scraping:
             return
+
+        if not _REQUESTS_OK:
+            messagebox.showerror(
+                "Missing Dependency",
+                "The 'requests' and 'beautifulsoup4' packages are required.\n"
+                "Run: pip install requests beautifulsoup4",
+            )
+            return
+
         url = self._url_var.get().strip()
         if not url:
             messagebox.showwarning("Missing URL", "Please enter a vendor capability URL.")
             return
+
         api_key = self._api_key_var.get().strip()
         if not api_key:
-            messagebox.showwarning("Missing API Key", "Please enter your Gemini API key.")
+            messagebox.showwarning("Missing API Key", "Please enter your API key.")
             return
+
+        model = self._selected_model_var.get().strip()
+        if not model:
+            messagebox.showwarning(
+                "No Model Selected",
+                "Please select an AI model.\n"
+                "Click 'Fetch Models' to load the available models.",
+            )
+            return
+
+        pid = self._current_provider_id()
 
         self._scraping = True
         self._scrape_btn.configure(state="disabled", text="⏳  Working …")
@@ -819,30 +1294,33 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._tabs.set("📋 Log")
         self._log(f"{'─'*50}")
         self._log(f"🚀 Starting extraction at {time.strftime('%H:%M:%S')}")
+        self._log(f"🤖 Provider: {PROVIDER_MAP[pid]['label']}  |  Model: {model}")
         self._log(f"🌐 URL: {url}")
 
         thread = threading.Thread(
             target=self._scrape_worker,
-            args=(url, api_key),
+            args=(url, api_key, pid, model),
             daemon=True,
         )
         thread.start()
 
-    def _scrape_worker(self, url: str, api_key: str) -> None:
+    def _scrape_worker(self, url: str, api_key: str, provider_id: str, model: str) -> None:
         try:
-            # Step 1: Scrape
             self._log("📡 Fetching vendor page …")
             self._set_status("Scraping vendor page …")
             raw_text = scrape_vendor_page(url)
             self._log(f"  ✅ Fetched {len(raw_text):,} chars of content")
 
-            # Step 2: Gemini extraction
-            self._log("🤖 Sending to Gemini 2.5 Flash for extraction …")
-            self._set_status("Calling Gemini API …")
-            constraints = extract_constraints_gemini(api_key, raw_text, url)
-            self._constraints = constraints
+            self._log(f"🤖 Sending to {PROVIDER_MAP[provider_id]['label']} ({model}) …")
+            self._set_status(f"Calling {PROVIDER_MAP[provider_id]['label']} API …")
 
-            self._log(f"  ✅ Extraction complete!")
+            extract_fn = EXTRACT_FN[provider_id]
+            constraints = extract_fn(api_key, model, raw_text, url)
+
+            with self._constraints_lock:
+                self._constraints = constraints
+
+            self._log("  ✅ Extraction complete!")
             self._log(f"  🏭 Vendor: {constraints.vendor_name}")
             self._log(f"  📏 Min Trace:       {constraints.min_trace_width_mm} mm")
             self._log(f"  ↔️  Min Clearance:   {constraints.min_clearance_mm} mm")
@@ -853,7 +1331,11 @@ class KiCadConfiguratorApp(ctk.CTk):
             if constraints.notes:
                 self._log(f"  📝 Notes: {constraints.notes[:200]}")
 
-            # Update UI
+            # Save the used provider/model to config
+            self._config["ai_provider"] = provider_id
+            self._config["ai_model"]    = model
+            save_config(self._config)
+
             self.after(0, lambda: self._render_results(constraints))
             self.after(0, lambda: self._inject_btn.configure(state="normal"))
             self._set_status(f"✅ Extracted constraints from {constraints.vendor_name}")
@@ -877,7 +1359,10 @@ class KiCadConfiguratorApp(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _inject_constraints(self) -> None:
-        if self._constraints is None:
+        with self._constraints_lock:
+            constraints = self._constraints
+
+        if constraints is None:
             messagebox.showwarning("No Data", "Please extract constraints first.")
             return
 
@@ -891,7 +1376,7 @@ class KiCadConfiguratorApp(ctk.CTk):
             messagebox.showwarning("No Project Name", "Please enter a project name.")
             return
 
-        output_dir = Path(output_dir_str)
+        output_dir   = Path(output_dir_str)
         template_dir = get_resource_path("kicad_template")
 
         if not template_dir.exists():
@@ -909,7 +1394,7 @@ class KiCadConfiguratorApp(ctk.CTk):
         def _worker():
             try:
                 dest = run_injection(
-                    self._constraints,
+                    constraints,
                     output_dir,
                     template_dir,
                     project_name,

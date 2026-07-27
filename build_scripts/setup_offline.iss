@@ -124,7 +124,16 @@ Filename: "{app}\{#AppName}.exe"; \
 ; [UninstallRun] section
 ; ---------------------------------------------------------------------------
 [UninstallRun]
-; No extra cleanup needed — standard unins000.exe handles all registered files
+; Force-delete any remaining files (e.g. files created post-install)
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
+  Parameters: "-NonInteractive -ExecutionPolicy Bypass -Command \"Start-Sleep 2; Remove-Item -Recurse -Force '{app}' -ErrorAction SilentlyContinue\""; \
+  Flags: runhidden nowait
+
+; ---------------------------------------------------------------------------
+; [UninstallDelete] section — removes entire installation folder tree
+; ---------------------------------------------------------------------------
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"
 
 ; ---------------------------------------------------------------------------
 ; [Code] section — custom wizard pages and validation
@@ -152,14 +161,33 @@ begin
 end;
 
 function InitializeUninstall(): Boolean;
+var
+  AppDataPath: string;
+  DeleteConfig: Integer;
 begin
   Result := True;
-  // Note: User config in %APPDATA%\KiCadConfigurator is intentionally
-  // preserved on uninstall to protect saved API keys and output paths.
+
+  // Ask about installation folder
   MsgBox(
-    'This will remove KiCad Constraint Configurator from your computer.' + #13#10 + #13#10 +
-    'Your saved configuration (API key, settings) in %APPDATA%\KiCadConfigurator' + #13#10 +
-    'will NOT be deleted. Remove that folder manually if desired.',
+    'This will completely remove KiCad Constraint Configurator from your computer.' + #13#10 +
+    'The installation folder and all application files will be deleted.',
     mbInformation, MB_OK
   );
+
+  // Offer to delete saved config / API keys in %APPDATA%
+  AppDataPath := ExpandConstant('{userappdata}\KiCadConfigurator');
+  if DirExists(AppDataPath) then
+  begin
+    DeleteConfig := MsgBox(
+      'Would you also like to delete your saved settings and API keys?' + #13#10 +
+      '  Folder: ' + AppDataPath + #13#10 + #13#10 +
+      'Click YES to permanently delete saved keys and config.' + #13#10 +
+      'Click NO  to keep your settings (you can re-use them later).',
+      mbConfirmation, MB_YESNO
+    );
+    if DeleteConfig = IDYES then
+    begin
+      DelTree(AppDataPath, True, True, True);
+    end;
+  end;
 end;
