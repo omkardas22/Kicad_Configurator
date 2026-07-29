@@ -91,7 +91,7 @@
   },
   "meta": {
     "filename": "template.kicad_pro",
-    "version": 1
+    "version": 3
   },
   "net_settings": {
     "classes": [
@@ -105,9 +105,11 @@
         "microvia_diameter": 0.3,
         "microvia_drill": 0.1,
         "name": "Default",
-        "pcb_color": "rgba(0,0,0,0)",
-        "schematic_color": "rgba(0,0,0,0)",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2147483647,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
         "track_width": 0.25,
+        "tuning_profile": "",
         "via_diameter": 0.8,
         "via_drill": 0.4,
         "wire_width": 6
@@ -122,9 +124,11 @@
         "microvia_diameter": 0.3,
         "microvia_drill": 0.1,
         "name": "Power",
-        "pcb_color": "rgba(228,26,28,0.8)",
-        "schematic_color": "rgba(228,26,28,0.8)",
+        "pcb_color": "rgba(228, 26, 28, 0.800)",
+        "priority": 2147483647,
+        "schematic_color": "rgba(228, 26, 28, 0.800)",
         "track_width": 0.5,
+        "tuning_profile": "",
         "via_diameter": 0.8,
         "via_drill": 0.4,
         "wire_width": 6
@@ -138,15 +142,20 @@
         "line_style": 0,
         "microvia_diameter": 0.3,
         "microvia_drill": 0.1,
-        "name": "CAN_Bus",
-        "pcb_color": "rgba(55,126,184,0.8)",
-        "schematic_color": "rgba(55,126,184,0.8)",
+        "name": "Differential_Pair",
+        "pcb_color": "rgba(55, 126, 184, 0.800)",
+        "priority": 2147483647,
+        "schematic_color": "rgba(55, 126, 184, 0.800)",
         "track_width": 0.25,
+        "tuning_profile": "",
         "via_diameter": 0.8,
         "via_drill": 0.4,
         "wire_width": 6
       }
     ],
+    "meta": {
+      "version": 5
+    },
     "net_colors": null,
     "netclass_assignments": null,
     "netclass_patterns": [
@@ -163,8 +172,20 @@
         "pattern": "VCC*"
       },
       {
-        "netclass": "CAN_Bus",
+        "netclass": "Differential_Pair",
+        "pattern": "DIFF_*"
+      },
+      {
+        "netclass": "Differential_Pair",
+        "pattern": "DP_*"
+      },
+      {
+        "netclass": "Differential_Pair",
         "pattern": "CAN_*"
+      },
+      {
+        "netclass": "Differential_Pair",
+        "pattern": "USB_*"
       }
     ]
   },

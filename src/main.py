@@ -61,29 +61,32 @@ APP_VERSION = "1.1.0"
 APPDATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "KiCadConfigurator"
 CONFIG_FILE = APPDATA_DIR / "config.json"
 
-# Colour palette
-CLR_BG      = "#0f1117"
-CLR_PANEL   = "#1a1d27"
-CLR_ACCENT  = "#5865f2"
-CLR_ACCENT2 = "#7289da"
-CLR_SUCCESS = "#43b581"
-CLR_WARNING = "#faa61a"
-CLR_ERROR   = "#ed4245"
-CLR_TEXT    = "#dcddde"
-CLR_SUBTEXT = "#72767d"
-CLR_BORDER  = "#2f3136"
-CLR_CARD    = "#1e2130"
+# Colour palette — synced with Stitch "Precision Engineering Interface" design system
+CLR_BG      = "#0b1326"   # surface
+CLR_PANEL   = "#131b2e"   # surface-container-low
+CLR_ACCENT  = "#4d8eff"   # primary-container
+CLR_ACCENT2 = "#adc6ff"   # primary
+CLR_SUCCESS = "#4edea3"   # secondary
+CLR_WARNING = "#f9bd22"   # tertiary
+CLR_ERROR   = "#ffb4ab"   # error
+CLR_TEXT    = "#dae2fd"   # on-surface
+CLR_SUBTEXT = "#c2c6d6"   # on-surface-variant
+CLR_BORDER  = "#424754"   # outline-variant
+CLR_CARD    = "#171f33"   # surface-container
 
 # Net-class defaults
 POWER_MULTIPLIER = 2.0
-POWER_COLOR      = "rgba(228,26,28,0.8)"
-CANBUS_COLOR     = "rgba(55,126,184,0.8)"
+POWER_COLOR      = "rgba(228, 26, 28, 0.800)"
+DIFF_PAIR_COLOR  = "rgba(55, 126, 184, 0.800)"
 
 NETCLASS_PATTERNS = [
-    {"netclass": "Power",   "pattern": "+*"},
-    {"netclass": "Power",   "pattern": "GND*"},
-    {"netclass": "Power",   "pattern": "VCC*"},
-    {"netclass": "CAN_Bus", "pattern": "CAN_*"},
+    {"netclass": "Power",             "pattern": "+*"},
+    {"netclass": "Power",             "pattern": "GND*"},
+    {"netclass": "Power",             "pattern": "VCC*"},
+    {"netclass": "Differential_Pair", "pattern": "DIFF_*"},
+    {"netclass": "Differential_Pair", "pattern": "DP_*"},
+    {"netclass": "Differential_Pair", "pattern": "CAN_*"},
+    {"netclass": "Differential_Pair", "pattern": "USB_*"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -480,8 +483,10 @@ def _build_net_class(name: str, constraints: PCBConstraints, color: str,
         "microvia_drill":     0.1,
         "name":               name,
         "pcb_color":          color,
+        "priority":           2147483647,
         "schematic_color":    color,
         "track_width":        track,
+        "tuning_profile":     "",
         "via_diameter":       via_d,
         "via_drill":          via_dr,
         "wire_width":         6,
@@ -489,14 +494,15 @@ def _build_net_class(name: str, constraints: PCBConstraints, color: str,
     return nc
 
 
-def inject_kicad_pro(pro_path: Path, constraints: PCBConstraints) -> None:
-    """Patch a .kicad_pro file (JSON) with extracted constraints and net classes."""
+def inject_kicad_pro(pro_path: Path, constraints: PCBConstraints,
+                     selected_presets: list[dict] | None = None) -> None:
+    """Patch a .kicad_pro file (JSON) with extracted constraints, net classes,
+    and user-selected track/via presets."""
     with open(pro_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    rules = data.setdefault("board", {}).setdefault(
-        "design_settings", {}
-    ).setdefault("rules", {})
+    design = data.setdefault("board", {}).setdefault("design_settings", {})
+    rules = design.setdefault("rules", {})
     rules["min_clearance"]          = constraints.min_clearance_mm
     rules["min_track_width"]        = constraints.min_trace_width_mm
     rules["min_via_diameter"]       = constraints.min_via_diameter_mm
@@ -505,13 +511,28 @@ def inject_kicad_pro(pro_path: Path, constraints: PCBConstraints) -> None:
     rules["min_hole_clearance"]     = constraints.min_clearance_mm
     rules["min_hole_to_hole"]       = constraints.min_hole_diameter_mm
 
-    default_nc = _build_net_class("Default",  constraints, "rgba(0,0,0,0)", multiplier=1.0)
-    power_nc   = _build_net_class("Power",    constraints, POWER_COLOR,     multiplier=POWER_MULTIPLIER)
-    canbus_nc  = _build_net_class("CAN_Bus",  constraints, CANBUS_COLOR,    multiplier=1.0, diff_pair=True)
+    default_nc   = _build_net_class("Default",           constraints, "rgba(0, 0, 0, 0.000)", multiplier=1.0)
+    power_nc     = _build_net_class("Power",             constraints, POWER_COLOR,             multiplier=POWER_MULTIPLIER)
+    diff_pair_nc = _build_net_class("Differential_Pair", constraints, DIFF_PAIR_COLOR,         multiplier=1.0, diff_pair=True)
 
     net_settings = data.setdefault("net_settings", {})
-    net_settings["classes"]          = [default_nc, power_nc, canbus_nc]
+    net_settings["classes"]          = [default_nc, power_nc, diff_pair_nc]
     net_settings["netclass_patterns"] = copy.deepcopy(NETCLASS_PATTERNS)
+
+    # ── Inject selected track/via presets ──────────────────────────────
+    if selected_presets:
+        # KiCad expects a 0.0 sentinel as the first entry in both lists
+        track_widths = [0.0] + sorted({p["track_width"] for p in selected_presets})
+        via_dims = sorted(
+            {(p["via_dia"], p["via_drill"]) for p in selected_presets},
+            key=lambda t: t[0],
+        )
+        design["track_widths"] = track_widths
+        design["via_dimensions"] = [
+            {"diameter": 0.0, "drill": 0.0},  # sentinel entry
+        ] + [
+            {"diameter": d, "drill": dr} for d, dr in via_dims
+        ]
 
     with open(pro_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -545,6 +566,7 @@ def run_injection(
     template_dir: Path,
     project_name: str,
     log_callback,
+    selected_presets: list[dict] | None = None,
 ) -> Path:
     """Copy templates to output_dir/<project_name>/ and inject constraints."""
     dest = output_dir / project_name
@@ -564,8 +586,11 @@ def run_injection(
 
     pro_path = dest / f"{project_name}.kicad_pro"
     log_callback("⚙️  Injecting constraints into .kicad_pro …")
-    inject_kicad_pro(pro_path, constraints)
-    log_callback("  ✅ .kicad_pro updated (design rules + net classes + patterns)")
+    inject_kicad_pro(pro_path, constraints, selected_presets)
+    if selected_presets:
+        log_callback(f"  ✅ .kicad_pro updated (design rules + net classes + {len(selected_presets)} presets)")
+    else:
+        log_callback("  ✅ .kicad_pro updated (design rules + net classes + patterns)")
 
     pcb_path = dest / f"{project_name}.kicad_pcb"
     log_callback("⚙️  Injecting constraints into .kicad_pcb …")
@@ -879,10 +904,12 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._tabs.pack(fill="both", expand=True, padx=12, pady=12)
 
         self._tabs.add("📊 Results")
+        self._tabs.add("📐 Rules & Presets")
         self._tabs.add("📋 Log")
         self._tabs.add("ℹ️ About")
 
         self._build_results_tab(self._tabs.tab("📊 Results"))
+        self._build_presets_tab(self._tabs.tab("📐 Rules & Presets"))
         self._build_log_tab(self._tabs.tab("📋 Log"))
         self._build_about_tab(self._tabs.tab("ℹ️ About"))
 
@@ -899,6 +926,125 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._results_placeholder.pack(expand=True, pady=60)
 
         self._cards_frame = ctk.CTkFrame(self._results_frame, fg_color="transparent")
+
+    def _build_presets_tab(self, parent) -> None:
+        """Build the '📐 Rules & Presets' tab content."""
+        self._presets_outer = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        self._presets_outer.pack(fill="both", expand=True)
+
+        # Placeholder — shown before any scrape
+        self._presets_placeholder = ctk.CTkLabel(
+            self._presets_outer,
+            text="No presets generated yet.\nRun 'Scrape & Extract' to load compatibility options.",
+            font=ctk.CTkFont(family="Segoe UI", size=14),
+            text_color=CLR_SUBTEXT,
+        )
+        self._presets_placeholder.pack(expand=True, pady=60)
+
+        # Container for live content (hidden until populated)
+        self._presets_content = ctk.CTkFrame(self._presets_outer, fg_color="transparent")
+
+        # ── Header row ─────────────────────────────────────────────────
+        header_row = ctk.CTkFrame(self._presets_content, fg_color="transparent")
+        header_row.pack(fill="x", padx=8, pady=(8, 12))
+
+        ctk.CTkLabel(
+            header_row,
+            text="⚡  Compatible Trace & Via Presets",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            text_color=CLR_TEXT,
+        ).pack(side="left")
+
+        self._vendor_compat_badge = ctk.CTkLabel(
+            header_row,
+            text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=CLR_ACCENT,
+            fg_color=CLR_CARD,
+            corner_radius=6,
+        )
+        self._vendor_compat_badge.pack(side="right", padx=4)
+
+        # ── Range display frame ────────────────────────────────────────
+        range_frame = ctk.CTkFrame(
+            self._presets_content, fg_color=CLR_CARD, corner_radius=10,
+            border_width=1, border_color=CLR_BORDER,
+        )
+        range_frame.pack(fill="x", padx=8, pady=(0, 12))
+        range_frame.columnconfigure((0, 1), weight=1)
+
+        # Trace width range
+        tw_frame = ctk.CTkFrame(range_frame, fg_color="transparent")
+        tw_frame.grid(row=0, column=0, padx=16, pady=12, sticky="ew")
+        ctk.CTkLabel(
+            tw_frame, text="TRACE WIDTH RANGE",
+            font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
+            text_color=CLR_SUBTEXT,
+        ).pack(anchor="w")
+        self._tw_range_label = ctk.CTkLabel(
+            tw_frame, text="— mm  to  — mm",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            text_color=CLR_ACCENT,
+        )
+        self._tw_range_label.pack(anchor="w", pady=(4, 0))
+
+        # Via size range
+        vs_frame = ctk.CTkFrame(range_frame, fg_color="transparent")
+        vs_frame.grid(row=0, column=1, padx=16, pady=12, sticky="ew")
+        ctk.CTkLabel(
+            vs_frame, text="VIA SIZE RANGE",
+            font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
+            text_color=CLR_SUBTEXT,
+        ).pack(anchor="w")
+        self._vs_range_label = ctk.CTkLabel(
+            vs_frame, text="— mm  to  — mm",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            text_color=CLR_ACCENT,
+        )
+        self._vs_range_label.pack(anchor="w", pady=(4, 0))
+
+        # ── Table header ───────────────────────────────────────────────
+        table_container = ctk.CTkFrame(
+            self._presets_content, fg_color=CLR_CARD, corner_radius=10,
+            border_width=1, border_color=CLR_BORDER,
+        )
+        table_container.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        col_headers = ["", "Preset Name", "Track Width", "Via Outer Dia", "Via Drill Dia", "Status"]
+        col_widths  = [40, 180, 110, 110, 110, 90]
+
+        hdr_frame = ctk.CTkFrame(table_container, fg_color=CLR_BG, corner_radius=0)
+        hdr_frame.pack(fill="x")
+        for i, (h, w) in enumerate(zip(col_headers, col_widths)):
+            ctk.CTkLabel(
+                hdr_frame, text=h, width=w,
+                font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
+                text_color=CLR_SUBTEXT, anchor="w",
+            ).grid(row=0, column=i, padx=8, pady=8, sticky="w")
+
+        # Scrollable rows
+        self._presets_table_frame = ctk.CTkScrollableFrame(
+            table_container, fg_color="transparent", height=320,
+        )
+        self._presets_table_frame.pack(fill="both", expand=True, padx=0, pady=0)
+
+        # ── Info footer ────────────────────────────────────────────────
+        info_frame = ctk.CTkFrame(
+            self._presets_content, fg_color=CLR_PANEL, corner_radius=8,
+            border_width=1, border_color=CLR_BORDER,
+        )
+        info_frame.pack(fill="x", padx=8, pady=(4, 8))
+        ctk.CTkLabel(
+            info_frame,
+            text="ℹ️  Selected presets will be injected directly as track/via size lists in KiCad.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_SUBTEXT, anchor="w",
+        ).pack(padx=12, pady=8, anchor="w")
+
+        # Data storage
+        self._preset_vars: list[ctk.BooleanVar] = []
+        self._preset_data: list[dict] = []
+        self._preset_row_widgets: list[list] = []
 
     def _build_log_tab(self, parent) -> None:
         self._log_text = ctk.CTkTextbox(
@@ -1019,6 +1165,197 @@ class KiCadConfiguratorApp(ctk.CTk):
             ).pack(padx=12, pady=(0, 10), anchor="w")
 
         self._tabs.set("📊 Results")
+
+        # Also populate the presets tab
+        self._generate_presets(c)
+        self._render_presets(c)
+
+    # ------------------------------------------------------------------
+    # Preset Generation & Rendering
+    # ------------------------------------------------------------------
+
+    def _generate_presets(self, c: PCBConstraints) -> None:
+        """Compute 10 trace/via presets from manufacturer min to practical max."""
+        mn_tw = c.min_trace_width_mm
+        mn_vd = c.min_via_diameter_mm
+        mn_vr = c.min_via_drill_mm
+
+        def clamp_tw(v: float) -> float:
+            return round(max(v, mn_tw), 4)
+
+        def clamp_vd(v: float) -> float:
+            return round(max(v, mn_vd), 4)
+
+        def clamp_vr(v: float) -> float:
+            return round(max(v, mn_vr), 4)
+
+        self._preset_data = [
+            {
+                "name": "Signal (Absolute Min)",
+                "track_width": clamp_tw(mn_tw),
+                "via_dia":     clamp_vd(mn_vd),
+                "via_drill":   clamp_vr(mn_vr),
+                "default_on":  True,
+            },
+            {
+                "name": "Signal (Fine)",
+                "track_width": clamp_tw(mn_tw * 1.27),
+                "via_dia":     clamp_vd(mn_vd),
+                "via_drill":   clamp_vr(mn_vr),
+                "default_on":  True,
+            },
+            {
+                "name": "Signal (Standard)",
+                "track_width": clamp_tw(0.200),
+                "via_dia":     clamp_vd(mn_vd + 0.1),
+                "via_drill":   clamp_vr(mn_vr + 0.1),
+                "default_on":  True,
+            },
+            {
+                "name": "Signal (Robust)",
+                "track_width": clamp_tw(0.254),
+                "via_dia":     clamp_vd(0.800),
+                "via_drill":   clamp_vr(0.450),
+                "default_on":  False,
+            },
+            {
+                "name": "Power (Low Current)",
+                "track_width": clamp_tw(0.400),
+                "via_dia":     clamp_vd(0.900),
+                "via_drill":   clamp_vr(0.500),
+                "default_on":  True,
+            },
+            {
+                "name": "Power (Medium Current)",
+                "track_width": clamp_tw(0.800),
+                "via_dia":     clamp_vd(1.000),
+                "via_drill":   clamp_vr(0.600),
+                "default_on":  True,
+            },
+            {
+                "name": "Power (High Current)",
+                "track_width": clamp_tw(1.200),
+                "via_dia":     clamp_vd(1.200),
+                "via_drill":   clamp_vr(0.700),
+                "default_on":  False,
+            },
+            {
+                "name": "Power (Max Current)",
+                "track_width": clamp_tw(2.000),
+                "via_dia":     clamp_vd(1.500),
+                "via_drill":   clamp_vr(0.900),
+                "default_on":  True,
+            },
+            {
+                "name": "Via (Standard Spec)",
+                "track_width": clamp_tw(0.254),
+                "via_dia":     clamp_vd(0.800),
+                "via_drill":   clamp_vr(0.400),
+                "default_on":  False,
+            },
+            {
+                "name": "Via (High Current)",
+                "track_width": clamp_tw(0.500),
+                "via_dia":     clamp_vd(1.200),
+                "via_drill":   clamp_vr(0.600),
+                "default_on":  False,
+            },
+        ]
+
+    def _render_presets(self, c: PCBConstraints) -> None:
+        """Render the preset table rows with checkboxes."""
+        # Hide placeholder, show content
+        self._presets_placeholder.pack_forget()
+        self._presets_content.pack(fill="both", expand=True)
+
+        # Update vendor badge
+        self._vendor_compat_badge.configure(text=f"  ✔ {c.vendor_name} Compatible  ")
+
+        # Update range labels
+        min_tw = min(p["track_width"] for p in self._preset_data)
+        max_tw = max(p["track_width"] for p in self._preset_data)
+        self._tw_range_label.configure(text=f"{min_tw:.3f} mm  to  {max_tw:.3f} mm")
+
+        min_vd = min(p["via_drill"] for p in self._preset_data)
+        max_vd = max(p["via_dia"] for p in self._preset_data)
+        self._vs_range_label.configure(text=f"{min_vd:.3f} mm  to  {max_vd:.3f} mm")
+
+        # Clear old rows
+        for widgets in self._preset_row_widgets:
+            for w in widgets:
+                w.destroy()
+        self._preset_row_widgets.clear()
+        self._preset_vars.clear()
+
+        col_widths = [40, 180, 110, 110, 110, 90]
+
+        for idx, preset in enumerate(self._preset_data):
+            var = ctk.BooleanVar(value=preset["default_on"])
+            self._preset_vars.append(var)
+
+            row_widgets = []
+            bg = "transparent"
+
+            # Checkbox
+            cb = ctk.CTkCheckBox(
+                self._presets_table_frame, text="", variable=var, width=col_widths[0],
+                fg_color=CLR_ACCENT, hover_color=CLR_ACCENT2,
+                border_color=CLR_BORDER, checkmark_color="#ffffff",
+            )
+            cb.grid(row=idx, column=0, padx=8, pady=6, sticky="w")
+            row_widgets.append(cb)
+
+            # Preset name
+            name_lbl = ctk.CTkLabel(
+                self._presets_table_frame, text=preset["name"], width=col_widths[1],
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                text_color=CLR_TEXT, anchor="w",
+            )
+            name_lbl.grid(row=idx, column=1, padx=8, pady=6, sticky="w")
+            row_widgets.append(name_lbl)
+
+            # Track width
+            tw_lbl = ctk.CTkLabel(
+                self._presets_table_frame, text=f"{preset['track_width']:.3f} mm",
+                width=col_widths[2],
+                font=ctk.CTkFont(family="Consolas", size=12),
+                text_color=CLR_ACCENT2, anchor="w",
+            )
+            tw_lbl.grid(row=idx, column=2, padx=8, pady=6, sticky="w")
+            row_widgets.append(tw_lbl)
+
+            # Via diameter
+            vd_lbl = ctk.CTkLabel(
+                self._presets_table_frame, text=f"{preset['via_dia']:.3f} mm",
+                width=col_widths[3],
+                font=ctk.CTkFont(family="Consolas", size=12),
+                text_color=CLR_ACCENT2, anchor="w",
+            )
+            vd_lbl.grid(row=idx, column=3, padx=8, pady=6, sticky="w")
+            row_widgets.append(vd_lbl)
+
+            # Via drill
+            vr_lbl = ctk.CTkLabel(
+                self._presets_table_frame, text=f"{preset['via_drill']:.3f} mm",
+                width=col_widths[4],
+                font=ctk.CTkFont(family="Consolas", size=12),
+                text_color=CLR_ACCENT2, anchor="w",
+            )
+            vr_lbl.grid(row=idx, column=4, padx=8, pady=6, sticky="w")
+            row_widgets.append(vr_lbl)
+
+            # Status badge
+            status_lbl = ctk.CTkLabel(
+                self._presets_table_frame, text="Compatible",
+                width=col_widths[5],
+                font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                text_color=CLR_SUCCESS, fg_color=CLR_CARD, corner_radius=4,
+            )
+            status_lbl.grid(row=idx, column=5, padx=8, pady=6, sticky="w")
+            row_widgets.append(status_lbl)
+
+            self._preset_row_widgets.append(row_widgets)
+
 
     # ------------------------------------------------------------------
     # Provider / Model helpers
@@ -1376,6 +1713,26 @@ class KiCadConfiguratorApp(ctk.CTk):
             messagebox.showwarning("No Project Name", "Please enter a project name.")
             return
 
+        # ── Collect selected presets ───────────────────────────────────
+        selected_presets: list[dict] | None = None
+        if self._preset_data and self._preset_vars:
+            selected_presets = [
+                {
+                    "track_width": p["track_width"],
+                    "via_dia":     p["via_dia"],
+                    "via_drill":   p["via_drill"],
+                }
+                for p, var in zip(self._preset_data, self._preset_vars)
+                if var.get()
+            ]
+            if not selected_presets:
+                messagebox.showwarning(
+                    "No Presets Selected",
+                    "Please select at least one trace/via preset in the\n"
+                    "'📐 Rules & Presets' tab before injecting.",
+                )
+                return
+
         output_dir   = Path(output_dir_str)
         template_dir = get_resource_path("kicad_template")
 
@@ -1390,6 +1747,8 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._inject_btn.configure(state="disabled", text="⏳  Injecting …")
         self._log(f"{'─'*50}")
         self._log(f"💉 Injection started at {time.strftime('%H:%M:%S')}")
+        if selected_presets:
+            self._log(f"  📐 {len(selected_presets)} presets selected for injection")
 
         def _worker():
             try:
@@ -1399,6 +1758,7 @@ class KiCadConfiguratorApp(ctk.CTk):
                     template_dir,
                     project_name,
                     self._log,
+                    selected_presets,
                 )
                 self._log(f"✅ Project created at: {dest}")
                 self._set_status(f"✅ Injected into {dest}")
