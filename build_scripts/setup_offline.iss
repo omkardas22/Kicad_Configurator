@@ -126,7 +126,7 @@ Filename: "{app}\{#AppName}.exe"; \
 [UninstallRun]
 ; Force-delete any remaining files (e.g. files created post-install)
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-  Parameters: "-NonInteractive -ExecutionPolicy Bypass -Command \"Start-Sleep 2; Remove-Item -Recurse -Force '{app}' -ErrorAction SilentlyContinue\""; \
+  Parameters: "-NonInteractive -ExecutionPolicy Bypass -Command ""Start-Sleep 2; Remove-Item -Recurse -Force '{app}' -ErrorAction SilentlyContinue"""; \
   Flags: runhidden nowait
 
 ; ---------------------------------------------------------------------------
