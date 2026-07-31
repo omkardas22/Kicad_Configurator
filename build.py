@@ -35,7 +35,7 @@ os.environ["PYTHONUTF8"] = "1"
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.0.0"
 APP_NAME = "KiCadConstraintConfigurator"
 ENTRY_SCRIPT = "src/main.py"
 TEMPLATE_DIR = "kicad_template"

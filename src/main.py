@@ -1,16 +1,19 @@
 """
 KiCad Constraint Configurator
 Author: KiCad Constraint Configurator Team
-Version: 1.1.0
+Version: 2.0.0
 
 Main application file. Provides a CustomTkinter GUI for:
   - Selecting an AI provider (Google Gemini, OpenAI, Anthropic, OpenRouter)
   - Entering a per-provider API key (stored in %APPDATA%/KiCadConfigurator/config.json)
   - Fetching available models from the provider with smart recommendations
   - Specifying a vendor URL (PCBWay, JLCPCB, etc.)
+  - Auto-generating project name from selected vendor
   - Scraping vendor capability pages with requests + BeautifulSoup
   - Extracting PCB constraints via AI structured output / Pydantic
+  - Column-based preset configuration (Signal/Power/Differential/Vias) with 10 tiers
   - Injecting extracted constraints into .kicad_pro (JSON) and .kicad_pcb (S-expression)
+  - KiCad 9/10 compatible output (version 20260206)
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import time
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional
+from urllib.parse import urlparse
 
 import customtkinter as ctk
 
@@ -57,7 +61,7 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 APP_NAME    = "KiCad Constraint Configurator"
-APP_VERSION = "1.1.0"
+APP_VERSION = "2.0.0"
 APPDATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "KiCadConfigurator"
 CONFIG_FILE = APPDATA_DIR / "config.json"
 
@@ -74,19 +78,44 @@ CLR_SUBTEXT = "#c2c6d6"   # on-surface-variant
 CLR_BORDER  = "#424754"   # outline-variant
 CLR_CARD    = "#171f33"   # surface-container
 
+# Category colour accents for column headers
+CLR_SIGNAL_COL = "#64b5f6"   # blue for signal traces
+CLR_POWER_COL  = "#ef5350"   # red for power traces
+CLR_DIFF_COL   = "#ab47bc"   # purple for differential pairs
+CLR_VIA_COL    = "#66bb6a"   # green for vias
+
 # Net-class defaults
+SIGNAL_MULTIPLIER = 1.0
+SIGNAL_COLOR     = "rgba(100, 181, 246, 0.800)"
 POWER_MULTIPLIER = 2.0
 POWER_COLOR      = "rgba(228, 26, 28, 0.800)"
 DIFF_PAIR_COLOR  = "rgba(55, 126, 184, 0.800)"
 
 NETCLASS_PATTERNS = [
+    {"netclass": "Signal",            "pattern": "SIG_*"},
+    {"netclass": "Signal",            "pattern": "UART_*"},
+    {"netclass": "Signal",            "pattern": "I2C_*"},
+    {"netclass": "Signal",            "pattern": "SPI_*"},
     {"netclass": "Power",             "pattern": "+*"},
     {"netclass": "Power",             "pattern": "GND*"},
     {"netclass": "Power",             "pattern": "VCC*"},
+    {"netclass": "Power",             "pattern": "VDD*"},
+    {"netclass": "Power",             "pattern": "VBUS*"},
     {"netclass": "Differential_Pair", "pattern": "DIFF_*"},
     {"netclass": "Differential_Pair", "pattern": "DP_*"},
     {"netclass": "Differential_Pair", "pattern": "CAN_*"},
     {"netclass": "Differential_Pair", "pattern": "USB_*"},
+    {"netclass": "Differential_Pair", "pattern": "ETH_*"},
+]
+
+# Vendor quick-fill definitions
+# Each entry: (button_label, url, project_name_prefix)
+VENDOR_QUICK_FILLS = [
+    ("JLCPCB",     "https://jlcpcb.com/capabilities/pcb",                       "JLCPCB"),
+    ("PCBWay",     "https://www.pcbway.com/capabilities.html",                  "PCBWay"),
+    ("OSHPark",    "https://docs.oshpark.com/submitting-designs/drill-specs/",  "OSHPark"),
+    ("AllPCB",     "https://www.allpcb.com/pcb_capability.html",                "AllPCB"),
+    ("NextPCB",    "https://www.nextpcb.com/pcb-capabilities",                  "NextPCB"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -205,6 +234,10 @@ if _PYDANTIC_OK:
         min_via_drill_mm:    float = Field(default=0.3,  description="Minimum via drill hole diameter in mm")
         min_hole_diameter_mm:float = Field(default=0.3,  description="Minimum mechanical drill hole diameter in mm")
         min_annular_ring_mm: float = Field(default=0.1,  description="Minimum pad annular ring width in mm")
+        max_trace_width_mm:  float = Field(default=6.0,  description="Maximum copper trace width in mm")
+        max_via_diameter_mm: float = Field(default=6.0,  description="Maximum via outer diameter in mm")
+        max_via_drill_mm:    float = Field(default=6.0,  description="Maximum via drill hole diameter in mm")
+        max_hole_diameter_mm:float = Field(default=6.35, description="Maximum mechanical drill hole diameter in mm")
         vendor_name:         str   = Field(default="Unknown Vendor", description="Name of the PCB manufacturer")
         source_url:          str   = Field(default="",   description="URL where constraints were scraped from")
         notes:               str   = Field(default="",   description="Any extra relevant notes from the vendor page")
@@ -212,7 +245,76 @@ else:
     class PCBConstraints:  # type: ignore[no-redef]
         """Fallback when Pydantic is unavailable."""
         def __init__(self, **kwargs: float | str):
-            self.__dict__.update(kwargs)
+            # Apply defaults for any missing fields
+            defaults = {
+                "min_trace_width_mm": 0.1, "min_clearance_mm": 0.1,
+                "min_via_diameter_mm": 0.6, "min_via_drill_mm": 0.3,
+                "min_hole_diameter_mm": 0.3, "min_annular_ring_mm": 0.1,
+                "max_trace_width_mm": 6.0, "max_via_diameter_mm": 6.0,
+                "max_via_drill_mm": 6.0, "max_hole_diameter_mm": 6.35,
+                "vendor_name": "Unknown Vendor", "source_url": "", "notes": "",
+            }
+            defaults.update(kwargs)
+            self.__dict__.update(defaults)
+
+
+def _sanitize_constraints(c: PCBConstraints) -> PCBConstraints:
+    """Ensure all constraint values are positive and reasonable."""
+    for attr in ("min_trace_width_mm", "min_clearance_mm", "min_via_diameter_mm",
+                 "min_via_drill_mm", "min_hole_diameter_mm", "min_annular_ring_mm"):
+        val = getattr(c, attr, 0.0)
+        if not isinstance(val, (int, float)) or val <= 0:
+            setattr(c, attr, 0.1)
+    for attr in ("max_trace_width_mm", "max_via_diameter_mm", "max_via_drill_mm",
+                 "max_hole_diameter_mm"):
+        val = getattr(c, attr, 0.0)
+        if not isinstance(val, (int, float)) or val <= 0:
+            setattr(c, attr, 6.0)
+    # Ensure max > min
+    if c.max_trace_width_mm <= c.min_trace_width_mm:
+        c.max_trace_width_mm = max(c.min_trace_width_mm * 20, 6.0)
+    if c.max_via_diameter_mm <= c.min_via_diameter_mm:
+        c.max_via_diameter_mm = max(c.min_via_diameter_mm * 10, 6.0)
+    if c.max_via_drill_mm <= c.min_via_drill_mm:
+        c.max_via_drill_mm = max(c.min_via_drill_mm * 10, 6.0)
+    return c
+
+
+# ---------------------------------------------------------------------------
+# URL / vendor name helpers
+# ---------------------------------------------------------------------------
+def _derive_vendor_name(url: str) -> str:
+    """Extract a readable vendor name from a URL."""
+    try:
+        parsed = urlparse(url)
+        domain = parsed.hostname or ""
+        # Remove www. and common TLDs
+        domain = re.sub(r"^www\.", "", domain)
+        # Take the main domain part
+        parts = domain.split(".")
+        if len(parts) >= 2:
+            name = parts[-2]  # e.g., "jlcpcb" from "jlcpcb.com"
+        else:
+            name = parts[0] if parts else "Custom"
+        # Capitalise
+        return name.upper() if len(name) <= 6 else name.capitalize()
+    except Exception:
+        return "Custom"
+
+
+def _derive_project_name(url: str) -> str:
+    """Generate a project name from a vendor URL."""
+    vendor = _derive_vendor_name(url)
+    return f"{vendor}_Project"
+
+
+def _validate_url(url: str) -> bool:
+    """Validate that a URL is well-formed with http/https scheme."""
+    try:
+        result = urlparse(url)
+        return result.scheme in ("http", "https") and bool(result.hostname)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -246,11 +348,25 @@ def scrape_vendor_page(url: str, timeout: int = 15) -> str:
 # Model fetcher — provider-specific
 # ---------------------------------------------------------------------------
 
+def _raise_for_status_with_detail(resp: requests.Response) -> None:
+    """Raise error with API's detailed error message if present."""
+    if not resp.ok:
+        try:
+            err_data = resp.json()
+            err_obj = err_data.get("error", {})
+            msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
+            if msg:
+                raise RuntimeError(f"[{resp.status_code}] {msg}")
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+        resp.raise_for_status()
+
+
 def fetch_models_google(api_key: str) -> list[str]:
     """Fetch available Gemini models via the REST API."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=100"
     resp = requests.get(url, timeout=12)
-    resp.raise_for_status()
+    _raise_for_status_with_detail(resp)
     data = resp.json()
     models = []
     for m in data.get("models", []):
@@ -259,7 +375,13 @@ def fetch_models_google(api_key: str) -> list[str]:
         if name.startswith("models/"):
             name = name[len("models/"):]
         # Only include models that support generateContent
-        supported = [a.get("name") for a in m.get("supportedGenerationMethods", [])]
+        raw_supported = m.get("supportedGenerationMethods", [])
+        supported = []
+        for item in raw_supported:
+            if isinstance(item, str):
+                supported.append(item)
+            elif isinstance(item, dict):
+                supported.append(item.get("name", ""))
         if "generateContent" in supported:
             models.append(name)
     return sorted(models)
@@ -272,7 +394,7 @@ def fetch_models_openai(api_key: str) -> list[str]:
         headers={"Authorization": f"Bearer {api_key}"},
         timeout=12,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_detail(resp)
     data = resp.json()
     ids = [m["id"] for m in data.get("data", [])]
     # Filter to useful chat/text completion models
@@ -292,7 +414,7 @@ def fetch_models_openrouter(api_key: str) -> list[str]:
         headers={"Authorization": f"Bearer {api_key}"},
         timeout=15,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_detail(resp)
     data = resp.json()
     return sorted([m["id"] for m in data.get("data", [])])
 
@@ -313,7 +435,8 @@ EXTRACTION_PROMPT_TEMPLATE = textwrap.dedent("""\
     You are an expert PCB manufacturing engineer.
     Below is raw text scraped from a PCB vendor capability page at: {source_url}
 
-    Extract the minimum PCB design constraints as numeric values in millimeters.
+    Extract the PCB design constraints as numeric values in millimeters.
+    Include BOTH minimum AND maximum capabilities where available.
     If a value is given in mils or inches, convert to mm (1 mil = 0.0254 mm, 1 inch = 25.4 mm).
     Return ONLY valid JSON matching this exact schema:
     {{
@@ -323,11 +446,18 @@ EXTRACTION_PROMPT_TEMPLATE = textwrap.dedent("""\
       "min_via_drill_mm":     <float>,
       "min_hole_diameter_mm": <float>,
       "min_annular_ring_mm":  <float>,
+      "max_trace_width_mm":   <float>,
+      "max_via_diameter_mm":  <float>,
+      "max_via_drill_mm":     <float>,
+      "max_hole_diameter_mm": <float>,
       "vendor_name":          "<string>",
       "source_url":           "<string>",
       "notes":                "<string>"
     }}
     Use conservative (larger) defaults when data is ambiguous or missing.
+    For maximum values, use the largest values the vendor supports.
+    If max values are not stated, use reasonable industry defaults
+    (e.g., max trace width 6mm, max via diameter 6mm, max drill 6.35mm).
 
     --- BEGIN VENDOR TEXT ---
     {raw_text}
@@ -366,7 +496,7 @@ def extract_constraints_google(api_key: str, model: str, raw_text: str, source_u
             temperature=0.1,
         ),
     )
-    data = json.loads(response.text)
+    data = _parse_json_response(response.text)
     data["source_url"] = source_url
     return PCBConstraints(**data)
 
@@ -462,6 +592,101 @@ EXTRACT_FN = {
 
 
 # ---------------------------------------------------------------------------
+# Preset Generation (10 tiers per category)
+# ---------------------------------------------------------------------------
+
+def _linspace(start: float, end: float, n: int) -> list[float]:
+    """Generate n evenly-spaced floats from start to end (inclusive)."""
+    if n <= 1:
+        return [start]
+    step = (end - start) / (n - 1)
+    return [round(start + i * step, 4) for i in range(n)]
+
+
+def generate_signal_trace_presets(c: PCBConstraints) -> list[dict]:
+    """Generate 10 signal trace width presets from min to practical max."""
+    mn = max(c.min_trace_width_mm, 0.05)
+    mx = max(min(max(c.max_trace_width_mm, mn * 5), 1.0), mn * 2)
+    widths = _linspace(mn, mx, 10)
+    names = [
+        "Ultra Fine", "Extra Fine", "Fine", "Narrow", "Standard",
+        "Medium", "Wide", "Heavy", "Extra Heavy", "Maximum",
+    ]
+    return [
+        {"name": f"Signal {names[i]}", "track_width": w, "category": "signal"}
+        for i, w in enumerate(widths)
+    ]
+
+
+def generate_power_trace_presets(c: PCBConstraints) -> list[dict]:
+    """Generate 10 power trace width presets from 2× min to max."""
+    mn = max(c.min_trace_width_mm * 2, 0.2)
+    mx = max(min(c.max_trace_width_mm, 6.0), mn * 2)
+    widths = _linspace(mn, mx, 10)
+    names = [
+        "Minimum", "Low", "Light", "Medium", "Standard",
+        "High", "Heavy", "Extra Heavy", "Ultra Heavy", "Maximum",
+    ]
+    return [
+        {"name": f"Power {names[i]}", "track_width": w, "category": "power"}
+        for i, w in enumerate(widths)
+    ]
+
+
+def generate_diff_pair_presets(c: PCBConstraints) -> list[dict]:
+    """Generate 10 differential pair presets (width + gap) from min to practical max."""
+    mn_w = max(c.min_trace_width_mm, 0.05)
+    mx_w = max(min(max(c.max_trace_width_mm, mn_w * 5), 0.8), mn_w * 2)
+    widths = _linspace(mn_w, mx_w, 10)
+    mn_gap = max(c.min_clearance_mm, 0.05)
+    mx_gap = max(min(mn_gap * 5, 0.5), mn_gap * 1.5)
+    gaps = _linspace(mn_gap, mx_gap, 10)
+    names = [
+        "Ultra Fine", "Extra Fine", "Fine", "Narrow", "Standard",
+        "Medium", "Wide", "Heavy", "Extra Heavy", "Maximum",
+    ]
+    return [
+        {
+            "name": f"Diff {names[i]}",
+            "diff_width": w,
+            "diff_gap": g,
+            "category": "diff_pair",
+        }
+        for i, (w, g) in enumerate(zip(widths, gaps))
+    ]
+
+
+def generate_via_presets(c: PCBConstraints) -> list[dict]:
+    """Generate 10 via size presets from min to max diameter/drill."""
+    mn_d = max(c.min_via_diameter_mm, 0.2)
+    mx_d = max(min(c.max_via_diameter_mm, 6.0), mn_d * 2)
+    diameters = _linspace(mn_d, mx_d, 10)
+
+    mn_dr = max(c.min_via_drill_mm, 0.1)
+    mx_dr = max(min(c.max_via_drill_mm, 6.0), mn_dr * 2)
+    drills = _linspace(mn_dr, mx_dr, 10)
+
+    # Ensure drill < diameter for each pair while preserving monotonic order
+    for i in range(len(drills)):
+        if drills[i] >= diameters[i]:
+            drills[i] = round(diameters[i] * 0.55, 4)
+
+    names = [
+        "Micro", "Ultra Fine", "Fine", "Small", "Standard",
+        "Medium", "Large", "Heavy", "Extra Heavy", "Maximum",
+    ]
+    return [
+        {
+            "name": f"Via {names[i]}",
+            "via_dia": d,
+            "via_drill": dr,
+            "category": "via",
+        }
+        for i, (d, dr) in enumerate(zip(diameters, drills))
+    ]
+
+
+# ---------------------------------------------------------------------------
 # KiCad injection engine
 # ---------------------------------------------------------------------------
 
@@ -495,11 +720,16 @@ def _build_net_class(name: str, constraints: PCBConstraints, color: str,
 
 
 def inject_kicad_pro(pro_path: Path, constraints: PCBConstraints,
-                     selected_presets: list[dict] | None = None) -> None:
+                     selected_signals: list[dict] | None = None,
+                     selected_power: list[dict] | None = None,
+                     selected_diff: list[dict] | None = None,
+                     selected_vias: list[dict] | None = None) -> None:
     """Patch a .kicad_pro file (JSON) with extracted constraints, net classes,
-    and user-selected track/via presets."""
+    user-selected track/via presets, and schematic sheet links."""
     with open(pro_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    project_name = pro_path.stem
 
     design = data.setdefault("board", {}).setdefault("design_settings", {})
     rules = design.setdefault("rules", {})
@@ -510,51 +740,134 @@ def inject_kicad_pro(pro_path: Path, constraints: PCBConstraints,
     rules["min_through_hole_diameter"] = constraints.min_hole_diameter_mm
     rules["min_hole_clearance"]     = constraints.min_clearance_mm
     rules["min_hole_to_hole"]       = constraints.min_hole_diameter_mm
+    rules["min_copper_edge_clearance"] = max(constraints.min_clearance_mm, 0.3048)
 
+    # Build net classes
     default_nc   = _build_net_class("Default",           constraints, "rgba(0, 0, 0, 0.000)", multiplier=1.0)
+    signal_nc    = _build_net_class("Signal",            constraints, SIGNAL_COLOR,            multiplier=SIGNAL_MULTIPLIER)
     power_nc     = _build_net_class("Power",             constraints, POWER_COLOR,             multiplier=POWER_MULTIPLIER)
     diff_pair_nc = _build_net_class("Differential_Pair", constraints, DIFF_PAIR_COLOR,         multiplier=1.0, diff_pair=True)
 
     net_settings = data.setdefault("net_settings", {})
-    net_settings["classes"]          = [default_nc, power_nc, diff_pair_nc]
+    net_settings["classes"]          = [default_nc, signal_nc, power_nc, diff_pair_nc]
     net_settings["netclass_patterns"] = copy.deepcopy(NETCLASS_PATTERNS)
 
-    # ── Inject selected track/via presets ──────────────────────────────
-    if selected_presets:
-        # KiCad expects a 0.0 sentinel as the first entry in both lists
-        track_widths = [0.0] + sorted({p["track_width"] for p in selected_presets})
+    # ── Inject selected track widths ──────────────────────────────────
+    track_widths_set = set()
+    if selected_signals:
+        for p in selected_signals:
+            track_widths_set.add(p["track_width"])
+    if selected_power:
+        for p in selected_power:
+            track_widths_set.add(p["track_width"])
+
+    if track_widths_set:
+        design["track_widths"] = [0.0] + sorted(track_widths_set)
+    else:
+        # Use sensible defaults from constraints
+        design["track_widths"] = [0.0, constraints.min_trace_width_mm]
+
+    # ── Inject selected via dimensions ────────────────────────────────
+    if selected_vias:
         via_dims = sorted(
-            {(p["via_dia"], p["via_drill"]) for p in selected_presets},
+            {(p["via_dia"], p["via_drill"]) for p in selected_vias},
             key=lambda t: t[0],
         )
-        design["track_widths"] = track_widths
         design["via_dimensions"] = [
             {"diameter": 0.0, "drill": 0.0},  # sentinel entry
         ] + [
             {"diameter": d, "drill": dr} for d, dr in via_dims
         ]
+    else:
+        design["via_dimensions"] = [
+            {"diameter": 0.0, "drill": 0.0},
+            {"diameter": constraints.min_via_diameter_mm, "drill": constraints.min_via_drill_mm},
+        ]
+
+    # ── Inject diff pair dimensions ───────────────────────────────────
+    if selected_diff:
+        diff_dims = sorted(
+            {(p["diff_width"], p["diff_gap"]) for p in selected_diff},
+            key=lambda t: t[0],
+        )
+        design["diff_pair_dimensions"] = [
+            {"gap": 0.0, "via_gap": 0.0, "width": 0.0},  # sentinel
+        ] + [
+            {"gap": g, "via_gap": g, "width": w} for w, g in diff_dims
+        ]
+    else:
+        design["diff_pair_dimensions"] = [
+            {"gap": 0.0, "via_gap": 0.0, "width": 0.0},
+        ]
+
+    # ── Update schematic sheet linking ───────────────────────────────
+    schematic = data.setdefault("schematic", {})
+    root_uuid = "00000000-0000-0000-0000-000000000001"
+    schematic["top_level_sheets"] = [
+        {
+            "filename": f"{project_name}.kicad_sch",
+            "name": project_name,
+            "uuid": root_uuid
+        }
+    ]
+    data["sheets"] = [
+        [
+            root_uuid,
+            project_name
+        ]
+    ]
+
+    # ── Update filename in meta ───────────────────────────────────────
+    data["meta"]["filename"] = pro_path.name
 
     with open(pro_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
 def inject_kicad_pcb(pcb_path: Path, constraints: PCBConstraints) -> None:
-    """Patch a .kicad_pcb file (S-expression) with extracted constraints via regex."""
+    """Patch a .kicad_pcb file (S-expression) with extracted constraints via regex.
+
+    The KiCad 9/10 template has these values inside the (setup ...) block.
+    We do NOT touch copper_finish (which is correctly inside the stackup block only).
+    """
     with open(pcb_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    replacements = {
-        r"\(clearance\s+[\d.]+\)":       f"(clearance {constraints.min_clearance_mm})",
-        r"\(track_width\s+[\d.]+\)":     f"(track_width {constraints.min_trace_width_mm})",
-        r"\(via_size\s+[\d.]+\)":        f"(via_size {constraints.min_via_diameter_mm})",
-        r"\(via_drill\s+[\d.]+\)":       f"(via_drill {constraints.min_via_drill_mm})",
-        r"\(via_min_size\s+[\d.]+\)":    f"(via_min_size {constraints.min_via_diameter_mm})",
-        r"\(via_min_drill\s+[\d.]+\)":   f"(via_min_drill {constraints.min_via_drill_mm})",
-        r"\(hole_to_hole_min\s+[\d.]+\)":f"(hole_to_hole_min {constraints.min_hole_diameter_mm})",
-    }
+    # Only replace fields that exist in the KiCad 9/10 setup block
+    # Note: In KiCad 9+, many of these fields are in the .kicad_pro, not .kicad_pcb
+    # The PCB file is more of a board representation than a settings store
 
-    for pattern, replacement in replacements.items():
-        content = re.sub(pattern, replacement, content)
+    # Validate: ensure no duplicate copper_finish outside stackup
+    # Count occurrences — should be exactly 1 (inside stackup)
+    cf_count = len(re.findall(r'\(copper_finish\s', content))
+    if cf_count > 1:
+        # Remove any copper_finish that appears outside the stackup block
+        # The correct one is inside (stackup ... (copper_finish ...) ...)
+        # Find the stackup block end
+        lines = content.split('\n')
+        in_stackup = False
+        stackup_depth = 0
+        fixed_lines = []
+        copper_finish_seen_in_stackup = False
+
+        for line in lines:
+            stripped = line.strip()
+            if '(stackup' in stripped:
+                in_stackup = True
+                stackup_depth = 0
+            if in_stackup:
+                stackup_depth += stripped.count('(') - stripped.count(')')
+                if '(copper_finish' in stripped:
+                    copper_finish_seen_in_stackup = True
+                if stackup_depth <= 0:
+                    in_stackup = False
+                fixed_lines.append(line)
+            elif '(copper_finish' in stripped and copper_finish_seen_in_stackup:
+                # Skip duplicate copper_finish outside stackup
+                continue
+            else:
+                fixed_lines.append(line)
+        content = '\n'.join(fixed_lines)
 
     with open(pcb_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -566,7 +879,10 @@ def run_injection(
     template_dir: Path,
     project_name: str,
     log_callback,
-    selected_presets: list[dict] | None = None,
+    selected_signals: list[dict] | None = None,
+    selected_power: list[dict] | None = None,
+    selected_diff: list[dict] | None = None,
+    selected_vias: list[dict] | None = None,
 ) -> Path:
     """Copy templates to output_dir/<project_name>/ and inject constraints."""
     dest = output_dir / project_name
@@ -586,18 +902,67 @@ def run_injection(
 
     pro_path = dest / f"{project_name}.kicad_pro"
     log_callback("⚙️  Injecting constraints into .kicad_pro …")
-    inject_kicad_pro(pro_path, constraints, selected_presets)
-    if selected_presets:
-        log_callback(f"  ✅ .kicad_pro updated (design rules + net classes + {len(selected_presets)} presets)")
-    else:
-        log_callback("  ✅ .kicad_pro updated (design rules + net classes + patterns)")
+    inject_kicad_pro(pro_path, constraints, selected_signals, selected_power,
+                     selected_diff, selected_vias)
+
+    preset_count = sum(len(s) for s in [selected_signals or [], selected_power or [],
+                                         selected_diff or [], selected_vias or []])
+    log_callback(f"  ✅ .kicad_pro updated (design rules + net classes + {preset_count} presets)")
 
     pcb_path = dest / f"{project_name}.kicad_pcb"
-    log_callback("⚙️  Injecting constraints into .kicad_pcb …")
+    log_callback("⚙️  Validating .kicad_pcb …")
     inject_kicad_pcb(pcb_path, constraints)
-    log_callback("  ✅ .kicad_pcb updated (setup block)")
+    log_callback("  ✅ .kicad_pcb validated (no duplicate fields)")
+
+    # ── Post-injection verification ───────────────────────────────────
+    log_callback("🔍  Running post-injection verification …")
+    _verify_output(pro_path, pcb_path, log_callback)
 
     return dest
+
+
+def _verify_output(pro_path: Path, pcb_path: Path, log_callback) -> None:
+    """Verify the generated files are valid."""
+    # Verify .kicad_pro is valid JSON
+    try:
+        with open(pro_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Check essential keys exist
+        assert "board" in data, "Missing 'board' key"
+        assert "net_settings" in data, "Missing 'net_settings' key"
+        assert "meta" in data, "Missing 'meta' key"
+        design = data["board"]["design_settings"]
+        assert "rules" in design, "Missing 'rules' in design_settings"
+        assert "track_widths" in design, "Missing 'track_widths'"
+        assert "via_dimensions" in design, "Missing 'via_dimensions'"
+        log_callback("  ✅ .kicad_pro: Valid JSON, all required keys present")
+    except json.JSONDecodeError as e:
+        log_callback(f"  ❌ .kicad_pro: Invalid JSON — {e}")
+    except AssertionError as e:
+        log_callback(f"  ⚠️ .kicad_pro: Missing key — {e}")
+
+    # Verify .kicad_pcb has balanced parentheses and no duplicate copper_finish
+    try:
+        with open(pcb_path, "r", encoding="utf-8") as f:
+            pcb_content = f.read()
+        depth = 0
+        for ch in pcb_content:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            if depth < 0:
+                raise ValueError("Unbalanced parentheses (too many closing)")
+        if depth != 0:
+            raise ValueError(f"Unbalanced parentheses (depth={depth} at end)")
+
+        cf_count = len(re.findall(r'\(copper_finish\s', pcb_content))
+        if cf_count > 1:
+            log_callback(f"  ⚠️ .kicad_pcb: Found {cf_count} copper_finish entries (expected 1)")
+        else:
+            log_callback("  ✅ .kicad_pcb: Balanced parentheses, no duplicate fields")
+    except Exception as e:
+        log_callback(f"  ❌ .kicad_pcb: Validation error — {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -608,8 +973,8 @@ class KiCadConfiguratorApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_NAME} v{APP_VERSION}")
-        self.geometry("980x760")
-        self.minsize(860, 660)
+        self.geometry("1100x820")
+        self.minsize(960, 720)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.configure(fg_color=CLR_BG)
@@ -624,9 +989,38 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._constraints_lock                      = threading.Lock()
         self._scraping:    bool                     = False
         self._models_list: list[str]                = []
+        self._is_alive:    bool                     = True  # Track if window exists
+
+        # Preset data storage (by category)
+        self._signal_presets: list[dict] = []
+        self._power_presets:  list[dict] = []
+        self._diff_presets:   list[dict] = []
+        self._via_presets:    list[dict] = []
+
+        # Checkbox vars (by category)
+        self._signal_vars: list[ctk.BooleanVar] = []
+        self._power_vars:  list[ctk.BooleanVar] = []
+        self._diff_vars:   list[ctk.BooleanVar] = []
+        self._via_vars:    list[ctk.BooleanVar] = []
 
         self._build_ui()
         self._restore_config()
+
+        # Handle window close gracefully
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        """Handle graceful window close."""
+        self._is_alive = False
+        self.destroy()
+
+    def _safe_after(self, ms: int, func) -> None:
+        """Thread-safe self.after() that checks if the window is still alive."""
+        if self._is_alive:
+            try:
+                self.after(ms, func)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -818,18 +1212,14 @@ class KiCadConfiguratorApp(ctk.CTk):
             quick_frame, text="Quick fill:",
             font=ctk.CTkFont(family="Segoe UI", size=11), text_color=CLR_SUBTEXT,
         ).pack(side="left", padx=(0, 6))
-        for label, url in [
-            ("JLCPCB",  "https://jlcpcb.com/capabilities/pcb"),
-            ("PCBWay",  "https://www.pcbway.com/capabilities.html"),
-            ("OSHPark", "https://docs.oshpark.com/submitting-designs/drill-specs/"),
-        ]:
+        for label, url, vendor_name in VENDOR_QUICK_FILLS:
             ctk.CTkButton(
-                quick_frame, text=label, width=68,
+                quick_frame, text=label, width=60,
                 fg_color=CLR_BORDER, hover_color=CLR_BORDER,
                 border_width=1, border_color=CLR_ACCENT,
                 text_color=CLR_ACCENT2,
                 font=ctk.CTkFont(family="Segoe UI", size=11),
-                command=lambda u=url: self._url_var.set(u),
+                command=lambda u=url, v=vendor_name: self._quick_fill_vendor(u, v),
             ).pack(side="left", padx=2)
 
         # ── Output Directory ───────────────────────────────────────────
@@ -904,12 +1294,12 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._tabs.pack(fill="both", expand=True, padx=12, pady=12)
 
         self._tabs.add("📊 Results")
-        self._tabs.add("📐 Rules & Presets")
+        self._tabs.add("📐 Presets")
         self._tabs.add("📋 Log")
         self._tabs.add("ℹ️ About")
 
         self._build_results_tab(self._tabs.tab("📊 Results"))
-        self._build_presets_tab(self._tabs.tab("📐 Rules & Presets"))
+        self._build_presets_tab(self._tabs.tab("📐 Presets"))
         self._build_log_tab(self._tabs.tab("📋 Log"))
         self._build_about_tab(self._tabs.tab("ℹ️ About"))
 
@@ -928,7 +1318,7 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._cards_frame = ctk.CTkFrame(self._results_frame, fg_color="transparent")
 
     def _build_presets_tab(self, parent) -> None:
-        """Build the '📐 Rules & Presets' tab content."""
+        """Build the '📐 Presets' tab with column-based layout."""
         self._presets_outer = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         self._presets_outer.pack(fill="both", expand=True)
 
@@ -950,7 +1340,7 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         ctk.CTkLabel(
             header_row,
-            text="⚡  Compatible Trace & Via Presets",
+            text="⚡  Trace, Via & Net Class Configuration",
             font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
             text_color=CLR_TEXT,
         ).pack(side="left")
@@ -965,86 +1355,88 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._vendor_compat_badge.pack(side="right", padx=4)
 
-        # ── Range display frame ────────────────────────────────────────
-        range_frame = ctk.CTkFrame(
-            self._presets_content, fg_color=CLR_CARD, corner_radius=10,
-            border_width=1, border_color=CLR_BORDER,
+        # ── Columns container ──────────────────────────────────────────
+        columns_frame = ctk.CTkFrame(self._presets_content, fg_color="transparent")
+        columns_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        columns_frame.columnconfigure((0, 1, 2, 3), weight=1)
+
+        # Build four columns
+        self._signal_col_frame = self._build_preset_column(
+            columns_frame, 0, "Signal Traces", "📏", CLR_SIGNAL_COL,
+            "Track widths for signal routing"
         )
-        range_frame.pack(fill="x", padx=8, pady=(0, 12))
-        range_frame.columnconfigure((0, 1), weight=1)
-
-        # Trace width range
-        tw_frame = ctk.CTkFrame(range_frame, fg_color="transparent")
-        tw_frame.grid(row=0, column=0, padx=16, pady=12, sticky="ew")
-        ctk.CTkLabel(
-            tw_frame, text="TRACE WIDTH RANGE",
-            font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
-            text_color=CLR_SUBTEXT,
-        ).pack(anchor="w")
-        self._tw_range_label = ctk.CTkLabel(
-            tw_frame, text="— mm  to  — mm",
-            font=ctk.CTkFont(family="Consolas", size=12),
-            text_color=CLR_ACCENT,
+        self._power_col_frame = self._build_preset_column(
+            columns_frame, 1, "Power Traces", "⚡", CLR_POWER_COL,
+            "Track widths for power delivery"
         )
-        self._tw_range_label.pack(anchor="w", pady=(4, 0))
-
-        # Via size range
-        vs_frame = ctk.CTkFrame(range_frame, fg_color="transparent")
-        vs_frame.grid(row=0, column=1, padx=16, pady=12, sticky="ew")
-        ctk.CTkLabel(
-            vs_frame, text="VIA SIZE RANGE",
-            font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
-            text_color=CLR_SUBTEXT,
-        ).pack(anchor="w")
-        self._vs_range_label = ctk.CTkLabel(
-            vs_frame, text="— mm  to  — mm",
-            font=ctk.CTkFont(family="Consolas", size=12),
-            text_color=CLR_ACCENT,
+        self._diff_col_frame = self._build_preset_column(
+            columns_frame, 2, "Diff Pairs", "↔️", CLR_DIFF_COL,
+            "Differential pair width / gap"
         )
-        self._vs_range_label.pack(anchor="w", pady=(4, 0))
-
-        # ── Table header ───────────────────────────────────────────────
-        table_container = ctk.CTkFrame(
-            self._presets_content, fg_color=CLR_CARD, corner_radius=10,
-            border_width=1, border_color=CLR_BORDER,
+        self._via_col_frame = self._build_preset_column(
+            columns_frame, 3, "Vias", "⭕", CLR_VIA_COL,
+            "Via diameter / drill sizes"
         )
-        table_container.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-
-        col_headers = ["", "Preset Name", "Track Width", "Via Outer Dia", "Via Drill Dia", "Status"]
-        col_widths  = [40, 180, 110, 110, 110, 90]
-
-        hdr_frame = ctk.CTkFrame(table_container, fg_color=CLR_BG, corner_radius=0)
-        hdr_frame.pack(fill="x")
-        for i, (h, w) in enumerate(zip(col_headers, col_widths)):
-            ctk.CTkLabel(
-                hdr_frame, text=h, width=w,
-                font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
-                text_color=CLR_SUBTEXT, anchor="w",
-            ).grid(row=0, column=i, padx=8, pady=8, sticky="w")
-
-        # Scrollable rows
-        self._presets_table_frame = ctk.CTkScrollableFrame(
-            table_container, fg_color="transparent", height=320,
-        )
-        self._presets_table_frame.pack(fill="both", expand=True, padx=0, pady=0)
 
         # ── Info footer ────────────────────────────────────────────────
         info_frame = ctk.CTkFrame(
             self._presets_content, fg_color=CLR_PANEL, corner_radius=8,
             border_width=1, border_color=CLR_BORDER,
         )
-        info_frame.pack(fill="x", padx=8, pady=(4, 8))
+        info_frame.pack(fill="x", padx=8, pady=(8, 8))
         ctk.CTkLabel(
             info_frame,
-            text="ℹ️  Selected presets will be injected directly as track/via size lists in KiCad.",
+            text="ℹ️  Each column has 10 configurations from minimum to maximum vendor capability.\n"
+                 "     Selected items will be injected as track/via/diff-pair size lists in your KiCad project.",
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=CLR_SUBTEXT, anchor="w",
+            text_color=CLR_SUBTEXT, anchor="w", justify="left",
         ).pack(padx=12, pady=8, anchor="w")
 
-        # Data storage
-        self._preset_vars: list[ctk.BooleanVar] = []
-        self._preset_data: list[dict] = []
-        self._preset_row_widgets: list[list] = []
+    def _build_preset_column(self, parent, col: int, title: str, icon: str,
+                              accent_color: str, subtitle: str) -> ctk.CTkFrame:
+        """Build a single column for the preset tab. Returns the scrollable inner frame."""
+        outer = ctk.CTkFrame(
+            parent, fg_color=CLR_CARD, corner_radius=10,
+            border_width=1, border_color=CLR_BORDER,
+        )
+        outer.grid(row=0, column=col, padx=4, pady=4, sticky="nsew")
+
+        # Column header
+        header = ctk.CTkFrame(outer, fg_color=accent_color, corner_radius=8, height=60)
+        header.pack(fill="x", padx=4, pady=4)
+        header.pack_propagate(False)
+
+        ctk.CTkLabel(
+            header,
+            text=f"{icon}  {title}",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color="#ffffff",
+        ).pack(padx=12, pady=(8, 0), anchor="w")
+
+        ctk.CTkLabel(
+            header,
+            text=subtitle,
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=CLR_SUBTEXT,
+        ).pack(padx=12, pady=(0, 4), anchor="w")
+
+        # Range label
+        range_label = ctk.CTkLabel(
+            outer, text="—",
+            font=ctk.CTkFont(family="Consolas", size=10),
+            text_color=CLR_SUBTEXT,
+        )
+        range_label.pack(padx=8, pady=(4, 2), anchor="w")
+        # Store as an attribute so we can update it later
+        outer._range_label = range_label  # type: ignore[attr-defined]
+
+        # Scrollable items area
+        items_frame = ctk.CTkScrollableFrame(
+            outer, fg_color="transparent", height=400,
+        )
+        items_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+
+        return items_frame
 
     def _build_log_tab(self, parent) -> None:
         self._log_text = ctk.CTkTextbox(
@@ -1072,7 +1464,7 @@ class KiCadConfiguratorApp(ctk.CTk):
             f"{APP_NAME} v{APP_VERSION}\n\n"
             "Automatically extracts PCB manufacturing constraints from vendor\n"
             "capability pages using AI, then injects them directly into your\n"
-            "KiCad project files.\n\n"
+            "KiCad project files (KiCad 9/10 compatible).\n\n"
             "──────────────────────────────────────\n"
             "Supported AI Providers:\n"
             "  • Google Gemini   (gemini-2.x-flash recommended)\n"
@@ -1083,13 +1475,19 @@ class KiCadConfiguratorApp(ctk.CTk):
             "  • Multi-provider AI with dynamic model listing\n"
             "  • Smart model recommendations per provider\n"
             "  • Per-provider API key storage\n"
-            "  • AI-powered constraint extraction\n"
-            "  • Auto net-class config (Default / Power / CAN_Bus)\n"
+            "  • AI-powered constraint extraction (min & max)\n"
+            "  • Column-based preset configuration (10 tiers each)\n"
+            "  • Signal / Power / Differential / Via categories\n"
+            "  • Auto net-class config (Default / Power / Diff_Pair)\n"
+            "  • Auto project naming from vendor selection\n"
             "  • .kicad_pro JSON patching (design rules + net classes)\n"
-            "  • .kicad_pcb S-expression patching (setup block)\n"
+            "  • .kicad_pcb validation (no duplicate fields)\n"
+            "  • KiCad 9/10 format output (version 20260206)\n"
+            "  • Post-injection verification\n"
             "  • API keys stored securely in %APPDATA%\n\n"
             "Supported PCB Vendors:\n"
-            "  • JLCPCB  •  PCBWay  •  OSH Park  •  Any vendor with a cap page\n\n"
+            "  • JLCPCB  •  PCBWay  •  OSH Park  •  AllPCB  •  NextPCB\n"
+            "  • Any vendor with a capability page\n\n"
             "──────────────────────────────────────\n"
             "GitHub: https://github.com/omkardas22/Kicad_Configurator\n"
         )
@@ -1097,7 +1495,7 @@ class KiCadConfiguratorApp(ctk.CTk):
             about_frame, text=about_text,
             font=ctk.CTkFont(family="Segoe UI", size=13),
             text_color=CLR_TEXT, justify="left", anchor="nw",
-            wraplength=480,
+            wraplength=520,
         ).pack(padx=20, pady=20, anchor="nw")
 
     # ------------------------------------------------------------------
@@ -1121,8 +1519,15 @@ class KiCadConfiguratorApp(ctk.CTk):
             text_color="white",
         ).pack(padx=16, pady=10)
 
-        # Constraint grid
-        metrics = [
+        # Constraint grid — minimums
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="Minimum Capabilities",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color=CLR_ACCENT2,
+        ).pack(padx=8, pady=(8, 4), anchor="w")
+
+        metrics_min = [
             ("Min Trace Width",  f"{c.min_trace_width_mm:.4f} mm",  "📏"),
             ("Min Clearance",    f"{c.min_clearance_mm:.4f} mm",    "↔️"),
             ("Min Via Diameter", f"{c.min_via_diameter_mm:.4f} mm", "⭕"),
@@ -1131,24 +1536,58 @@ class KiCadConfiguratorApp(ctk.CTk):
             ("Min Annular Ring", f"{c.min_annular_ring_mm:.4f} mm", "🔘"),
         ]
 
-        grid = ctk.CTkFrame(self._cards_frame, fg_color="transparent")
-        grid.pack(fill="x")
-        grid.columnconfigure((0, 1), weight=1)
+        grid_min = ctk.CTkFrame(self._cards_frame, fg_color="transparent")
+        grid_min.pack(fill="x")
+        grid_min.columnconfigure((0, 1, 2), weight=1)
 
-        for i, (label, value, icon) in enumerate(metrics):
-            card = ctk.CTkFrame(grid, fg_color=CLR_BG, corner_radius=8)
-            card.grid(row=i // 2, column=i % 2, padx=4, pady=4, sticky="nsew")
-            ctk.CTkLabel(card, text=icon, font=ctk.CTkFont(size=20)).pack(pady=(10, 2))
+        for i, (label, value, icon) in enumerate(metrics_min):
+            card = ctk.CTkFrame(grid_min, fg_color=CLR_BG, corner_radius=8)
+            card.grid(row=i // 3, column=i % 3, padx=4, pady=4, sticky="nsew")
+            ctk.CTkLabel(card, text=icon, font=ctk.CTkFont(size=18)).pack(pady=(8, 2))
             ctk.CTkLabel(
                 card, text=value,
-                font=ctk.CTkFont(family="Consolas", size=16, weight="bold"),
+                font=ctk.CTkFont(family="Consolas", size=14, weight="bold"),
                 text_color=CLR_ACCENT2,
             ).pack()
             ctk.CTkLabel(
                 card, text=label,
-                font=ctk.CTkFont(family="Segoe UI", size=11),
+                font=ctk.CTkFont(family="Segoe UI", size=10),
                 text_color=CLR_SUBTEXT,
-            ).pack(pady=(0, 10))
+            ).pack(pady=(0, 8))
+
+        # Maximum capabilities
+        ctk.CTkLabel(
+            self._cards_frame,
+            text="Maximum Capabilities",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color=CLR_SUCCESS,
+        ).pack(padx=8, pady=(12, 4), anchor="w")
+
+        metrics_max = [
+            ("Max Trace Width",  f"{c.max_trace_width_mm:.4f} mm",  "📏"),
+            ("Max Via Diameter", f"{c.max_via_diameter_mm:.4f} mm", "⭕"),
+            ("Max Via Drill",    f"{c.max_via_drill_mm:.4f} mm",    "🔩"),
+            ("Max Hole Dia",     f"{c.max_hole_diameter_mm:.4f} mm","🕳️"),
+        ]
+
+        grid_max = ctk.CTkFrame(self._cards_frame, fg_color="transparent")
+        grid_max.pack(fill="x")
+        grid_max.columnconfigure((0, 1, 2, 3), weight=1)
+
+        for i, (label, value, icon) in enumerate(metrics_max):
+            card = ctk.CTkFrame(grid_max, fg_color=CLR_BG, corner_radius=8)
+            card.grid(row=0, column=i, padx=4, pady=4, sticky="nsew")
+            ctk.CTkLabel(card, text=icon, font=ctk.CTkFont(size=18)).pack(pady=(8, 2))
+            ctk.CTkLabel(
+                card, text=value,
+                font=ctk.CTkFont(family="Consolas", size=14, weight="bold"),
+                text_color=CLR_SUCCESS,
+            ).pack()
+            ctk.CTkLabel(
+                card, text=label,
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color=CLR_SUBTEXT,
+            ).pack(pady=(0, 8))
 
         if c.notes:
             notes_card = ctk.CTkFrame(self._cards_frame, fg_color=CLR_BG, corner_radius=8)
@@ -1161,109 +1600,28 @@ class KiCadConfiguratorApp(ctk.CTk):
             ctk.CTkLabel(
                 notes_card, text=c.notes,
                 font=ctk.CTkFont(family="Segoe UI", size=11),
-                text_color=CLR_SUBTEXT, wraplength=360, justify="left", anchor="nw",
+                text_color=CLR_SUBTEXT, wraplength=400, justify="left", anchor="nw",
             ).pack(padx=12, pady=(0, 10), anchor="w")
 
         self._tabs.set("📊 Results")
 
         # Also populate the presets tab
-        self._generate_presets(c)
-        self._render_presets(c)
+        self._generate_all_presets(c)
+        self._render_all_presets(c)
 
     # ------------------------------------------------------------------
-    # Preset Generation & Rendering
+    # Preset Generation & Rendering (Column-based)
     # ------------------------------------------------------------------
 
-    def _generate_presets(self, c: PCBConstraints) -> None:
-        """Compute 10 trace/via presets from manufacturer min to practical max."""
-        mn_tw = c.min_trace_width_mm
-        mn_vd = c.min_via_diameter_mm
-        mn_vr = c.min_via_drill_mm
+    def _generate_all_presets(self, c: PCBConstraints) -> None:
+        """Generate 10 presets for each category."""
+        self._signal_presets = generate_signal_trace_presets(c)
+        self._power_presets  = generate_power_trace_presets(c)
+        self._diff_presets   = generate_diff_pair_presets(c)
+        self._via_presets    = generate_via_presets(c)
 
-        def clamp_tw(v: float) -> float:
-            return round(max(v, mn_tw), 4)
-
-        def clamp_vd(v: float) -> float:
-            return round(max(v, mn_vd), 4)
-
-        def clamp_vr(v: float) -> float:
-            return round(max(v, mn_vr), 4)
-
-        self._preset_data = [
-            {
-                "name": "Signal (Absolute Min)",
-                "track_width": clamp_tw(mn_tw),
-                "via_dia":     clamp_vd(mn_vd),
-                "via_drill":   clamp_vr(mn_vr),
-                "default_on":  True,
-            },
-            {
-                "name": "Signal (Fine)",
-                "track_width": clamp_tw(mn_tw * 1.27),
-                "via_dia":     clamp_vd(mn_vd),
-                "via_drill":   clamp_vr(mn_vr),
-                "default_on":  True,
-            },
-            {
-                "name": "Signal (Standard)",
-                "track_width": clamp_tw(0.200),
-                "via_dia":     clamp_vd(mn_vd + 0.1),
-                "via_drill":   clamp_vr(mn_vr + 0.1),
-                "default_on":  True,
-            },
-            {
-                "name": "Signal (Robust)",
-                "track_width": clamp_tw(0.254),
-                "via_dia":     clamp_vd(0.800),
-                "via_drill":   clamp_vr(0.450),
-                "default_on":  False,
-            },
-            {
-                "name": "Power (Low Current)",
-                "track_width": clamp_tw(0.400),
-                "via_dia":     clamp_vd(0.900),
-                "via_drill":   clamp_vr(0.500),
-                "default_on":  True,
-            },
-            {
-                "name": "Power (Medium Current)",
-                "track_width": clamp_tw(0.800),
-                "via_dia":     clamp_vd(1.000),
-                "via_drill":   clamp_vr(0.600),
-                "default_on":  True,
-            },
-            {
-                "name": "Power (High Current)",
-                "track_width": clamp_tw(1.200),
-                "via_dia":     clamp_vd(1.200),
-                "via_drill":   clamp_vr(0.700),
-                "default_on":  False,
-            },
-            {
-                "name": "Power (Max Current)",
-                "track_width": clamp_tw(2.000),
-                "via_dia":     clamp_vd(1.500),
-                "via_drill":   clamp_vr(0.900),
-                "default_on":  True,
-            },
-            {
-                "name": "Via (Standard Spec)",
-                "track_width": clamp_tw(0.254),
-                "via_dia":     clamp_vd(0.800),
-                "via_drill":   clamp_vr(0.400),
-                "default_on":  False,
-            },
-            {
-                "name": "Via (High Current)",
-                "track_width": clamp_tw(0.500),
-                "via_dia":     clamp_vd(1.200),
-                "via_drill":   clamp_vr(0.600),
-                "default_on":  False,
-            },
-        ]
-
-    def _render_presets(self, c: PCBConstraints) -> None:
-        """Render the preset table rows with checkboxes."""
+    def _render_all_presets(self, c: PCBConstraints) -> None:
+        """Render all four columns of presets."""
         # Hide placeholder, show content
         self._presets_placeholder.pack_forget()
         self._presets_content.pack(fill="both", expand=True)
@@ -1271,91 +1629,113 @@ class KiCadConfiguratorApp(ctk.CTk):
         # Update vendor badge
         self._vendor_compat_badge.configure(text=f"  ✔ {c.vendor_name} Compatible  ")
 
-        # Update range labels
-        min_tw = min(p["track_width"] for p in self._preset_data)
-        max_tw = max(p["track_width"] for p in self._preset_data)
-        self._tw_range_label.configure(text=f"{min_tw:.3f} mm  to  {max_tw:.3f} mm")
+        # Render each column
+        self._signal_vars = self._render_column(
+            self._signal_col_frame, self._signal_presets,
+            value_fmt=lambda p: f"{p['track_width']:.3f} mm",
+            default_indices={0, 2, 4, 7},  # Select some useful defaults
+        )
+        self._update_range_label(
+            self._signal_col_frame,
+            f"{self._signal_presets[0]['track_width']:.3f} — {self._signal_presets[-1]['track_width']:.3f} mm"
+        )
 
-        min_vd = min(p["via_drill"] for p in self._preset_data)
-        max_vd = max(p["via_dia"] for p in self._preset_data)
-        self._vs_range_label.configure(text=f"{min_vd:.3f} mm  to  {max_vd:.3f} mm")
+        self._power_vars = self._render_column(
+            self._power_col_frame, self._power_presets,
+            value_fmt=lambda p: f"{p['track_width']:.3f} mm",
+            default_indices={0, 2, 4, 6, 9},
+        )
+        self._update_range_label(
+            self._power_col_frame,
+            f"{self._power_presets[0]['track_width']:.3f} — {self._power_presets[-1]['track_width']:.3f} mm"
+        )
 
-        # Clear old rows
-        for widgets in self._preset_row_widgets:
-            for w in widgets:
-                w.destroy()
-        self._preset_row_widgets.clear()
-        self._preset_vars.clear()
+        self._diff_vars = self._render_column(
+            self._diff_col_frame, self._diff_presets,
+            value_fmt=lambda p: f"W:{p['diff_width']:.3f} G:{p['diff_gap']:.3f}",
+            default_indices={0, 2, 4, 7},
+        )
+        self._update_range_label(
+            self._diff_col_frame,
+            f"{self._diff_presets[0]['diff_width']:.3f} — {self._diff_presets[-1]['diff_width']:.3f} mm"
+        )
 
-        col_widths = [40, 180, 110, 110, 110, 90]
+        self._via_vars = self._render_column(
+            self._via_col_frame, self._via_presets,
+            value_fmt=lambda p: f"D:{p['via_dia']:.3f} H:{p['via_drill']:.3f}",
+            default_indices={0, 2, 4, 6, 9},
+        )
+        self._update_range_label(
+            self._via_col_frame,
+            f"{self._via_presets[0]['via_dia']:.3f} — {self._via_presets[-1]['via_dia']:.3f} mm"
+        )
 
-        for idx, preset in enumerate(self._preset_data):
-            var = ctk.BooleanVar(value=preset["default_on"])
-            self._preset_vars.append(var)
+    def _render_column(self, col_frame: ctk.CTkScrollableFrame, presets: list[dict],
+                        value_fmt, default_indices: set[int]) -> list[ctk.BooleanVar]:
+        """Render 10 preset rows in a column frame. Returns the checkbox BooleanVars."""
+        # Clear existing widgets
+        for w in col_frame.winfo_children():
+            w.destroy()
 
-            row_widgets = []
-            bg = "transparent"
+        vars_list: list[ctk.BooleanVar] = []
+
+        for idx, preset in enumerate(presets):
+            var = ctk.BooleanVar(value=(idx in default_indices))
+            vars_list.append(var)
+
+            row_frame = ctk.CTkFrame(col_frame, fg_color="transparent")
+            row_frame.pack(fill="x", padx=2, pady=1)
+
+            # Tier number badge
+            tier_num = idx + 1
+            ctk.CTkLabel(
+                row_frame,
+                text=f"{tier_num:02d}",
+                font=ctk.CTkFont(family="Consolas", size=9, weight="bold"),
+                text_color=CLR_BORDER, width=20,
+            ).pack(side="left", padx=(0, 4))
 
             # Checkbox
             cb = ctk.CTkCheckBox(
-                self._presets_table_frame, text="", variable=var, width=col_widths[0],
+                row_frame, text="", variable=var, width=20,
                 fg_color=CLR_ACCENT, hover_color=CLR_ACCENT2,
                 border_color=CLR_BORDER, checkmark_color="#ffffff",
+                checkbox_width=18, checkbox_height=18,
             )
-            cb.grid(row=idx, column=0, padx=8, pady=6, sticky="w")
-            row_widgets.append(cb)
+            cb.pack(side="left", padx=(0, 4))
 
-            # Preset name
-            name_lbl = ctk.CTkLabel(
-                self._presets_table_frame, text=preset["name"], width=col_widths[1],
-                font=ctk.CTkFont(family="Segoe UI", size=12),
-                text_color=CLR_TEXT, anchor="w",
-            )
-            name_lbl.grid(row=idx, column=1, padx=8, pady=6, sticky="w")
-            row_widgets.append(name_lbl)
-
-            # Track width
-            tw_lbl = ctk.CTkLabel(
-                self._presets_table_frame, text=f"{preset['track_width']:.3f} mm",
-                width=col_widths[2],
-                font=ctk.CTkFont(family="Consolas", size=12),
+            # Value label
+            ctk.CTkLabel(
+                row_frame,
+                text=value_fmt(preset),
+                font=ctk.CTkFont(family="Consolas", size=11),
                 text_color=CLR_ACCENT2, anchor="w",
-            )
-            tw_lbl.grid(row=idx, column=2, padx=8, pady=6, sticky="w")
-            row_widgets.append(tw_lbl)
+            ).pack(side="left", fill="x", expand=True)
 
-            # Via diameter
-            vd_lbl = ctk.CTkLabel(
-                self._presets_table_frame, text=f"{preset['via_dia']:.3f} mm",
-                width=col_widths[3],
-                font=ctk.CTkFont(family="Consolas", size=12),
-                text_color=CLR_ACCENT2, anchor="w",
-            )
-            vd_lbl.grid(row=idx, column=3, padx=8, pady=6, sticky="w")
-            row_widgets.append(vd_lbl)
+            # Preset name (smaller)
+            ctk.CTkLabel(
+                row_frame,
+                text=preset["name"].split(" ", 1)[-1] if " " in preset["name"] else preset["name"],
+                font=ctk.CTkFont(family="Segoe UI", size=9),
+                text_color=CLR_SUBTEXT, anchor="e",
+            ).pack(side="right", padx=(4, 2))
 
-            # Via drill
-            vr_lbl = ctk.CTkLabel(
-                self._presets_table_frame, text=f"{preset['via_drill']:.3f} mm",
-                width=col_widths[4],
-                font=ctk.CTkFont(family="Consolas", size=12),
-                text_color=CLR_ACCENT2, anchor="w",
-            )
-            vr_lbl.grid(row=idx, column=4, padx=8, pady=6, sticky="w")
-            row_widgets.append(vr_lbl)
+        return vars_list
 
-            # Status badge
-            status_lbl = ctk.CTkLabel(
-                self._presets_table_frame, text="Compatible",
-                width=col_widths[5],
-                font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
-                text_color=CLR_SUCCESS, fg_color=CLR_CARD, corner_radius=4,
-            )
-            status_lbl.grid(row=idx, column=5, padx=8, pady=6, sticky="w")
-            row_widgets.append(status_lbl)
+    def _update_range_label(self, col_frame: ctk.CTkScrollableFrame, text: str) -> None:
+        """Update the range label for a column."""
+        parent = col_frame.master  # The outer CTkFrame
+        if hasattr(parent, '_range_label'):
+            parent._range_label.configure(text=f"Range: {text}")
 
-            self._preset_row_widgets.append(row_widgets)
+    # ------------------------------------------------------------------
+    # Quick-fill vendor
+    # ------------------------------------------------------------------
 
+    def _quick_fill_vendor(self, url: str, vendor_name: str) -> None:
+        """Set the vendor URL and auto-generate a project name."""
+        self._url_var.set(url)
+        self._project_name_var.set(f"{vendor_name}_Project")
 
     # ------------------------------------------------------------------
     # Provider / Model helpers
@@ -1470,9 +1850,12 @@ class KiCadConfiguratorApp(ctk.CTk):
         def _worker():
             try:
                 models = FETCH_MODELS_FN[pid](api_key)
-                self.after(0, lambda: self._on_models_fetched(models))
+                self._safe_after(0, lambda: self._on_models_fetched(models))
             except Exception as exc:
-                self.after(0, lambda: self._on_models_error(str(exc)))
+                err_msg = str(exc).strip()
+                if not err_msg or err_msg == "None":
+                    err_msg = f"{type(exc).__name__}: {exc!r}"
+                self._safe_after(0, lambda: self._on_models_error(err_msg))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1573,11 +1956,13 @@ class KiCadConfiguratorApp(ctk.CTk):
     def _log(self, message: str) -> None:
         """Append message to log textbox (thread-safe)."""
         def _do():
+            if not self._is_alive:
+                return
             self._log_text.configure(state="normal")
             self._log_text.insert("end", f"{message}\n")
             self._log_text.see("end")
             self._log_text.configure(state="disabled")
-        self.after(0, _do)
+        self._safe_after(0, _do)
 
     def _clear_log(self) -> None:
         self._log_text.configure(state="normal")
@@ -1585,7 +1970,7 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._log_text.configure(state="disabled")
 
     def _set_status(self, msg: str) -> None:
-        self.after(0, lambda: self._status_var.set(msg))
+        self._safe_after(0, lambda: self._status_var.set(msg))
 
     # ------------------------------------------------------------------
     # Scrape & Extract (background thread)
@@ -1608,6 +1993,13 @@ class KiCadConfiguratorApp(ctk.CTk):
             messagebox.showwarning("Missing URL", "Please enter a vendor capability URL.")
             return
 
+        if not _validate_url(url):
+            messagebox.showwarning(
+                "Invalid URL",
+                "Please enter a valid URL starting with http:// or https://",
+            )
+            return
+
         api_key = self._api_key_var.get().strip()
         if not api_key:
             messagebox.showwarning("Missing API Key", "Please enter your API key.")
@@ -1623,6 +2015,11 @@ class KiCadConfiguratorApp(ctk.CTk):
             return
 
         pid = self._current_provider_id()
+
+        # Auto-generate project name from URL if still default
+        current_name = self._project_name_var.get().strip()
+        if current_name == "MyPCBProject" or not current_name:
+            self._project_name_var.set(_derive_project_name(url))
 
         self._scraping = True
         self._scrape_btn.configure(state="disabled", text="⏳  Working …")
@@ -1654,6 +2051,9 @@ class KiCadConfiguratorApp(ctk.CTk):
             extract_fn = EXTRACT_FN[provider_id]
             constraints = extract_fn(api_key, model, raw_text, url)
 
+            # Sanitize extracted values
+            constraints = _sanitize_constraints(constraints)
+
             with self._constraints_lock:
                 self._constraints = constraints
 
@@ -1665,6 +2065,9 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._log(f"  🔩 Min Via Drill:   {constraints.min_via_drill_mm} mm")
             self._log(f"  🕳️  Min Hole Dia:    {constraints.min_hole_diameter_mm} mm")
             self._log(f"  🔘 Min Annular:     {constraints.min_annular_ring_mm} mm")
+            self._log(f"  📏 Max Trace:       {constraints.max_trace_width_mm} mm")
+            self._log(f"  ⭕ Max Via Dia:     {constraints.max_via_diameter_mm} mm")
+            self._log(f"  🔩 Max Via Drill:   {constraints.max_via_drill_mm} mm")
             if constraints.notes:
                 self._log(f"  📝 Notes: {constraints.notes[:200]}")
 
@@ -1673,18 +2076,18 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._config["ai_model"]    = model
             save_config(self._config)
 
-            self.after(0, lambda: self._render_results(constraints))
-            self.after(0, lambda: self._inject_btn.configure(state="normal"))
+            self._safe_after(0, lambda: self._render_results(constraints))
+            self._safe_after(0, lambda: self._inject_btn.configure(state="normal"))
             self._set_status(f"✅ Extracted constraints from {constraints.vendor_name}")
 
         except Exception as exc:
             self._log(f"❌ Error: {exc}")
             self._set_status(f"Error: {exc}")
-            self.after(0, lambda: messagebox.showerror("Extraction Failed", str(exc)))
+            self._safe_after(0, lambda: messagebox.showerror("Extraction Failed", str(exc)))
 
         finally:
             self._scraping = False
-            self.after(0, self._reset_scrape_ui)
+            self._safe_after(0, self._reset_scrape_ui)
 
     def _reset_scrape_ui(self) -> None:
         self._scrape_btn.configure(state="normal", text="🔍  Scrape & Extract Constraints")
@@ -1713,25 +2116,41 @@ class KiCadConfiguratorApp(ctk.CTk):
             messagebox.showwarning("No Project Name", "Please enter a project name.")
             return
 
-        # ── Collect selected presets ───────────────────────────────────
-        selected_presets: list[dict] | None = None
-        if self._preset_data and self._preset_vars:
-            selected_presets = [
-                {
-                    "track_width": p["track_width"],
-                    "via_dia":     p["via_dia"],
-                    "via_drill":   p["via_drill"],
-                }
-                for p, var in zip(self._preset_data, self._preset_vars)
-                if var.get()
-            ]
-            if not selected_presets:
-                messagebox.showwarning(
-                    "No Presets Selected",
-                    "Please select at least one trace/via preset in the\n"
-                    "'📐 Rules & Presets' tab before injecting.",
-                )
-                return
+        # Sanitize project name (remove invalid filename chars)
+        project_name = re.sub(r'[<>:"/\\|?*]', '_', project_name).strip()
+        if not project_name:
+            messagebox.showwarning("Invalid Name", "Project name contains only invalid characters.")
+            return
+
+        # ── Collect selected presets by category ──────────────────────
+        selected_signals = [
+            self._signal_presets[i] for i, var in enumerate(self._signal_vars) if var.get()
+        ] if self._signal_vars else None
+
+        selected_power = [
+            self._power_presets[i] for i, var in enumerate(self._power_vars) if var.get()
+        ] if self._power_vars else None
+
+        selected_diff = [
+            self._diff_presets[i] for i, var in enumerate(self._diff_vars) if var.get()
+        ] if self._diff_vars else None
+
+        selected_vias = [
+            self._via_presets[i] for i, var in enumerate(self._via_vars) if var.get()
+        ] if self._via_vars else None
+
+        total_selected = sum(len(s) for s in [
+            selected_signals or [], selected_power or [],
+            selected_diff or [], selected_vias or []
+        ])
+
+        if total_selected == 0:
+            messagebox.showwarning(
+                "No Presets Selected",
+                "Please select at least one preset in the\n"
+                "'📐 Presets' tab before injecting.",
+            )
+            return
 
         output_dir   = Path(output_dir_str)
         template_dir = get_resource_path("kicad_template")
@@ -1747,8 +2166,7 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._inject_btn.configure(state="disabled", text="⏳  Injecting …")
         self._log(f"{'─'*50}")
         self._log(f"💉 Injection started at {time.strftime('%H:%M:%S')}")
-        if selected_presets:
-            self._log(f"  📐 {len(selected_presets)} presets selected for injection")
+        self._log(f"  📐 {total_selected} presets selected across all categories")
 
         def _worker():
             try:
@@ -1758,21 +2176,24 @@ class KiCadConfiguratorApp(ctk.CTk):
                     template_dir,
                     project_name,
                     self._log,
-                    selected_presets,
+                    selected_signals,
+                    selected_power,
+                    selected_diff,
+                    selected_vias,
                 )
                 self._log(f"✅ Project created at: {dest}")
                 self._set_status(f"✅ Injected into {dest}")
-                self.after(0, lambda: messagebox.showinfo(
+                self._safe_after(0, lambda: messagebox.showinfo(
                     "Done!",
                     f"KiCad project created successfully:\n{dest}\n\n"
-                    "Open the .kicad_pro file in KiCad to start designing!",
+                    "Open the .kicad_pro file in KiCad 9+ to start designing!",
                 ))
             except Exception as exc:
                 self._log(f"❌ Injection failed: {exc}")
                 self._set_status(f"Error: {exc}")
-                self.after(0, lambda: messagebox.showerror("Injection Failed", str(exc)))
+                self._safe_after(0, lambda: messagebox.showerror("Injection Failed", str(exc)))
             finally:
-                self.after(0, lambda: self._inject_btn.configure(
+                self._safe_after(0, lambda: self._inject_btn.configure(
                     state="normal", text="💉  Inject into KiCad Files"
                 ))
 

@@ -4,15 +4,15 @@
 ; during installation using PowerShell, then extracts it to {app}.
 ;
 ; Build via build.py or directly:
-;   ISCC.exe /DAppVersion=1.0.0 /DRootDir="D:\path\to\repo" ^
-;            /DOutputDir="releases\v1.0.0\web_installer" setup_web.iss
+;   ISCC.exe /DAppVersion=2.0.0 /DRootDir="D:\path\to\repo" ^
+;            /DOutputDir="releases\v2.0.0\web_installer" setup_web.iss
 ; ============================================================================
 
 ; ---------------------------------------------------------------------------
 ; Version defines (overridable from CLI with /D flag)
 ; ---------------------------------------------------------------------------
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "2.0.0"
 #endif
 
 #ifndef AppName
@@ -24,7 +24,7 @@
 #endif
 
 #ifndef OutputDir
-  #define OutputDir "..\releases\v1.0.0\web_installer"
+  #define OutputDir "..\releases\v2.0.0\web_installer"
 #endif
 
 ; Payload download URL — points to GitHub release asset
@@ -158,11 +158,11 @@ begin
     Exit;
   end;
 
-  // Check internet connectivity via a quick PowerShell test
-  if RunPS('Test-Connection -ComputerName github.com -Count 1 -Quiet') <> 0 then
+  // Check internet connectivity via a quick HTTPS PowerShell test (avoids ICMP ping blocks)
+  if RunPS('[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $r = [System.Net.WebRequest]::Create("https://github.com"); $r.Timeout = 5000; $res = $r.GetResponse(); $res.Close()') <> 0 then
   begin
     MsgBox(
-      'Cannot reach github.com.' + #13#10 +
+      'Cannot reach github.com via HTTPS.' + #13#10 +
       'A working internet connection is required to download the application.' + #13#10 + #13#10 +
       'Please check your network and try again, or use the Offline installer.',
       mbError, MB_OK

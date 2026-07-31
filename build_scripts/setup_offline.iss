@@ -3,15 +3,15 @@
 ; Compiles a self-contained .exe bundling the full PyInstaller dist output.
 ;
 ; Build via build.py or directly:
-;   ISCC.exe /DAppVersion=1.0.0 /DRootDir="D:\path\to\repo" ^
-;            /DOutputDir="releases\v1.0.0\standalone_installer" setup_offline.iss
+;   ISCC.exe /DAppVersion=2.0.0 /DRootDir="D:\path\to\repo" ^
+;            /DOutputDir="releases\v2.0.0\standalone_installer" setup_offline.iss
 ; ============================================================================
 
 ; ---------------------------------------------------------------------------
 ; Version defines (overridable from CLI with /D flag)
 ; ---------------------------------------------------------------------------
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "2.0.0"
 #endif
 
 #ifndef AppName
@@ -23,7 +23,7 @@
 #endif
 
 #ifndef OutputDir
-  #define OutputDir "..\releases\v1.0.0\standalone_installer"
+  #define OutputDir "..\releases\v2.0.0\standalone_installer"
 #endif
 
 ; ---------------------------------------------------------------------------

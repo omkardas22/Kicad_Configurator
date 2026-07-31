@@ -11,7 +11,7 @@ build_pyinstaller/
 *.spec
 
 # PyInstaller
-*.spec
+*.manifest
 
 # Virtual environments
 .venv/
@@ -36,6 +36,12 @@ src/config.json
 
 # Logs
 *.log
+
+# Releases (built artifacts — too large for git)
+releases/
+
+# Test / verification scripts (dev-only)
+verify_output.py
 
 # Auto-exclude: GitHub push script
 push_to_github.py
