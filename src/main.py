@@ -1725,6 +1725,14 @@ class KiCadConfiguratorApp(ctk.CTk):
             command=self._send_custom_track_to_preset,
         ).pack(side="left", padx=(0, 8))
 
+        ctk.CTkButton(
+            track_input_row, text="Clear All", width=70,
+            fg_color=CLR_BORDER, hover_color=CLR_ERROR,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT,
+            command=self._clear_custom_tracks,
+        ).pack(side="left", padx=(0, 8))
+
         self._custom_track_status = ctk.CTkLabel(
             track_input_row, text="",
             font=ctk.CTkFont(family="Segoe UI", size=11),
@@ -1820,6 +1828,14 @@ class KiCadConfiguratorApp(ctk.CTk):
             fg_color=CLR_ACCENT, hover_color=CLR_ACCENT2,
             font=ctk.CTkFont(family="Segoe UI", size=11),
             command=self._send_custom_via_to_preset,
+        ).pack(side="left", padx=(0, 8))
+        
+        ctk.CTkButton(
+            via_input_row2, text="Clear All", width=70,
+            fg_color=CLR_BORDER, hover_color=CLR_ERROR,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT,
+            command=self._clear_custom_vias,
         ).pack(side="left", padx=(0, 8))
 
         self._custom_via_status = ctk.CTkLabel(
@@ -1959,9 +1975,24 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
 
     def _send_custom_track_to_preset(self) -> None:
-        """Add the current custom track to the library AND send it to the Presets menu."""
+        """Add the current custom track to the library AND send it to the Presets menu, or send all if empty."""
+        input_str = self._custom_track_entry.get().strip()
+        
+        if not input_str:
+            if not self._custom_tracks:
+                self._custom_track_status.configure(
+                    text="⚠️ No valid numbers", text_color=CLR_WARNING
+                )
+                return
+            # Input is empty, but we have items in the list. Push all to presets
+            self._push_tracks_to_presets(self._custom_tracks)
+            self._custom_track_status.configure(
+                text=f"✅ Sent {len(self._custom_tracks)} tracks to Presets", text_color=CLR_SUCCESS
+            )
+            return
+
         try:
-            width = float(self._custom_track_entry.get().strip())
+            width = float(input_str)
         except (ValueError, TypeError):
             self._custom_track_status.configure(
                 text="⚠️ Enter a valid number", text_color=CLR_WARNING
@@ -1979,42 +2010,51 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._save_custom_sizes()
             self._render_custom_tracks()
             
-        # Inject into preset tabs
+        # Inject this SINGLE track into preset tabs
+        self._push_tracks_to_presets([width])
+        self._custom_track_entry.delete(0, "end")
+        self._custom_track_status.configure(
+            text=f"✅ Sent to Presets", text_color=CLR_SUCCESS
+        )
+
+    def _push_tracks_to_presets(self, widths: list[float]) -> None:
         if self._constraints is None:
             self._custom_track_status.configure(
                 text="⚠️ Scrape constraints first", text_color=CLR_WARNING
             )
             return
             
-        # Check if already injected
-        if any(abs(p["track_width"] - width) < 0.0001 for p in self._signal_presets):
-            self._custom_track_status.configure(
-                text="⚠️ Already in Presets menu", text_color=CLR_WARNING
-            )
-            return
+        added = 0
+        for width in widths:
+            if any(abs(p["track_width"] - width) < 0.0001 for p in self._signal_presets):
+                continue
             
-        self._signal_presets.append({"name": f"Custom {width}mm", "track_width": width, "category": "signal", "is_manual": True})
-        self._power_presets.append({"name": f"Custom {width}mm", "track_width": width, "category": "power", "is_manual": True})
-        
-        # Re-render keeping existing selections
-        sig_sel = {i for i, var in enumerate(self._signal_vars) if var.get()} | {len(self._signal_presets)-1}
-        pwr_sel = {i for i, var in enumerate(self._power_vars) if var.get()} | {len(self._power_presets)-1}
-        
-        self._signal_vars = self._render_column(
-            self._signal_col_frame, self._signal_presets,
-            value_fmt=lambda p: f"{p['track_width']:.3f} mm",
-            default_indices=sig_sel,
-        )
-        self._power_vars = self._render_column(
-            self._power_col_frame, self._power_presets,
-            value_fmt=lambda p: f"{p['track_width']:.3f} mm",
-            default_indices=pwr_sel,
-        )
-        
-        self._custom_track_entry.delete(0, "end")
-        self._custom_track_status.configure(
-            text=f"✅ Sent to Presets", text_color=CLR_SUCCESS
-        )
+            self._signal_presets.append({"name": f"🟡 Custom {width}mm", "track_width": width, "category": "signal", "is_manual": True})
+            self._power_presets.append({"name": f"🟡 Custom {width}mm", "track_width": width, "category": "power", "is_manual": True})
+            added += 1
+            
+        if added > 0:
+            # Re-render keeping existing selections
+            sig_sel = {i for i, var in enumerate(self._signal_vars) if var.get()}
+            pwr_sel = {i for i, var in enumerate(self._power_vars) if var.get()}
+            
+            # Add newly added indices to selection
+            new_sig_sel = set(range(len(self._signal_presets) - added, len(self._signal_presets)))
+            new_pwr_sel = set(range(len(self._power_presets) - added, len(self._power_presets)))
+            
+            sig_sel.update(new_sig_sel)
+            pwr_sel.update(new_pwr_sel)
+            
+            self._signal_vars = self._render_column(
+                self._signal_col_frame, self._signal_presets,
+                value_fmt=lambda p: f"{p['track_width']:.3f} mm",
+                default_indices=sig_sel,
+            )
+            self._power_vars = self._render_column(
+                self._power_col_frame, self._power_presets,
+                value_fmt=lambda p: f"{p['track_width']:.3f} mm",
+                default_indices=pwr_sel,
+            )
 
     def _remove_custom_track(self, width: float) -> None:
         """Remove a custom track width."""
@@ -2022,6 +2062,13 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._custom_tracks.remove(width)
             self._save_custom_sizes()
             self._render_custom_tracks()
+
+    def _clear_custom_tracks(self) -> None:
+        """Clear all custom track widths."""
+        self._custom_tracks.clear()
+        self._save_custom_sizes()
+        self._render_custom_tracks()
+        self._custom_track_status.configure(text="✅ Cleared", text_color=CLR_SUCCESS)
 
     def _render_custom_tracks(self) -> None:
         """Render the list of custom track widths with compatibility status."""
@@ -2127,10 +2174,26 @@ class KiCadConfiguratorApp(ctk.CTk):
             )
 
     def _send_custom_via_to_preset(self) -> None:
-        """Add the current custom via to the library AND send it to the Presets menu."""
+        """Add the current custom via to the library AND send it to the Presets menu, or send all if empty."""
+        dia_str = self._custom_via_dia_entry.get().strip()
+        drill_str = self._custom_via_drill_entry.get().strip()
+        
+        if not dia_str or not drill_str:
+            if not self._custom_vias:
+                self._custom_via_status.configure(
+                    text="⚠️ No valid numbers", text_color=CLR_WARNING
+                )
+                return
+            # Input is empty, but we have items in the list. Push all to presets
+            self._push_vias_to_presets(self._custom_vias)
+            self._custom_via_status.configure(
+                text=f"✅ Sent {len(self._custom_vias)} vias to Presets", text_color=CLR_SUCCESS
+            )
+            return
+
         try:
-            dia = float(self._custom_via_dia_entry.get().strip())
-            drill = float(self._custom_via_drill_entry.get().strip())
+            dia = float(dia_str)
+            drill = float(drill_str)
         except (ValueError, TypeError):
             self._custom_via_status.configure(
                 text="⚠️ Enter valid numbers", text_color=CLR_WARNING
@@ -2159,45 +2222,49 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._save_custom_sizes()
             self._render_custom_vias()
             
-        # Inject into preset tabs
+        # Inject this SINGLE via into preset tabs
+        self._push_vias_to_presets([[dia, drill]])
+        self._custom_via_dia_entry.delete(0, "end")
+        self._custom_via_drill_entry.delete(0, "end")
+        self._custom_via_ar_entry.delete(0, "end")
+        self._custom_via_status.configure(
+            text=f"✅ Sent to Presets", text_color=CLR_SUCCESS
+        )
+
+    def _push_vias_to_presets(self, vias: list[list[float]]) -> None:
         if self._constraints is None:
             self._custom_via_status.configure(
                 text="⚠️ Scrape constraints first", text_color=CLR_WARNING
             )
             return
             
-        # Check if already injected
-        if any(abs(p["via_dia"] - dia) < 0.0001 and abs(p["via_drill"] - drill) < 0.0001 for p in self._via_presets):
-            self._custom_via_status.configure(
-                text="⚠️ Already in Presets menu", text_color=CLR_WARNING
-            )
-            return
+        added = 0
+        for v in vias:
+            dia, drill = v[0], v[1]
+            if any(abs(p["via_dia"] - dia) < 0.0001 and abs(p["via_drill"] - drill) < 0.0001 for p in self._via_presets):
+                continue
+                
+            self._via_presets.append({
+                "name": f"🟡 Custom {dia}/{drill}mm",
+                "via_dia": dia,
+                "via_drill": drill,
+                "annular_ring": round((dia - drill) / 2, 4),
+                "category": "via",
+                "is_manual": True
+            })
+            added += 1
             
-        self._via_presets.append({
-            "name": f"Custom {dia}/{drill}mm",
-            "via_dia": dia,
-            "via_drill": drill,
-            "annular_ring": round((dia - drill) / 2, 4),
-            "category": "via",
-            "is_manual": True
-        })
-        
-        # Re-render keeping existing selections
-        via_sel = {i for i, var in enumerate(self._via_vars) if var.get()} | {len(self._via_presets)-1}
-        
-        self._via_vars = self._render_column(
-            self._via_col_frame, self._via_presets,
-            value_fmt=lambda p: f"D:{p['via_dia']:.2f} H:{p['via_drill']:.2f} AR:{p['annular_ring']:.3f}",
-            default_indices=via_sel,
-        )
-        
-        self._custom_via_dia_entry.delete(0, "end")
-        self._custom_via_drill_entry.delete(0, "end")
-        self._custom_via_ar_entry.delete(0, "end")
-        
-        self._custom_via_status.configure(
-            text=f"✅ Sent to Presets", text_color=CLR_SUCCESS
-        )
+        if added > 0:
+            # Re-render keeping existing selections
+            via_sel = {i for i, var in enumerate(self._via_vars) if var.get()}
+            new_via_sel = set(range(len(self._via_presets) - added, len(self._via_presets)))
+            via_sel.update(new_via_sel)
+            
+            self._via_vars = self._render_column(
+                self._via_col_frame, self._via_presets,
+                value_fmt=lambda p: f"D:{p['via_dia']:.2f} H:{p['via_drill']:.2f} AR:{p['annular_ring']:.3f}",
+                default_indices=via_sel,
+            )
 
     def _remove_custom_via(self, dia: float, drill: float) -> None:
         """Remove a custom via size."""
@@ -2207,6 +2274,13 @@ class KiCadConfiguratorApp(ctk.CTk):
         ]
         self._save_custom_sizes()
         self._render_custom_vias()
+
+    def _clear_custom_vias(self) -> None:
+        """Clear all custom via sizes."""
+        self._custom_vias.clear()
+        self._save_custom_sizes()
+        self._render_custom_vias()
+        self._custom_via_status.configure(text="✅ Cleared", text_color=CLR_SUCCESS)
 
     def _render_custom_vias(self) -> None:
         """Render the list of custom via sizes with compatibility status."""
