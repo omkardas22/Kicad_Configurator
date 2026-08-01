@@ -663,7 +663,7 @@ def generate_signal_trace_presets(c: PCBConstraints) -> list[dict]:
         "Medium", "Wide", "Heavy", "Extra Heavy", "Maximum",
     ]
     return [
-        {"name": f"Signal {names[i]}", "track_width": w, "category": "signal"}
+        {"name": f"⭐ Signal {names[i]}", "track_width": w, "category": "signal"}
         for i, w in enumerate(widths)
     ]
 
@@ -678,7 +678,7 @@ def generate_power_trace_presets(c: PCBConstraints) -> list[dict]:
         "High", "Heavy", "Extra Heavy", "Ultra Heavy", "Maximum",
     ]
     return [
-        {"name": f"Power {names[i]}", "track_width": w, "category": "power"}
+        {"name": f"⭐ Power {names[i]}", "track_width": w, "category": "power"}
         for i, w in enumerate(widths)
     ]
 
@@ -697,7 +697,7 @@ def generate_diff_pair_presets(c: PCBConstraints) -> list[dict]:
     ]
     return [
         {
-            "name": f"Diff {names[i]}",
+            "name": f"⭐ Diff {names[i]}",
             "diff_width": w,
             "diff_gap": g,
             "category": "diff_pair",
@@ -1668,12 +1668,23 @@ class KiCadConfiguratorApp(ctk.CTk):
         outer = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         outer.pack(fill="both", expand=True)
 
+        top_header_frame = ctk.CTkFrame(outer, fg_color="transparent")
+        top_header_frame.pack(fill="x", padx=16, pady=(16, 4))
+        
         ctk.CTkLabel(
-            outer,
+            top_header_frame,
             text="⚙️  Custom Track & Via Sizes",
             font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
             text_color=CLR_TEXT,
-        ).pack(padx=16, pady=(16, 4), anchor="w")
+        ).pack(side="left")
+
+        self._restrict_custom_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            top_header_frame, text="Restrict to Manufacturer Capabilities",
+            variable=self._restrict_custom_var,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=CLR_TEXT,
+        ).pack(side="right")
 
         ctk.CTkLabel(
             outer,
@@ -1925,17 +1936,16 @@ class KiCadConfiguratorApp(ctk.CTk):
             drill = float(drill_str) if drill_str else None
             
             if dia is not None and drill is not None:
-                calc_ar = (dia - drill) / 2
-                if c and calc_ar < c.min_annular_ring_mm:
-                    msg = f"⚠️ AR < Manufacturer Min ({c.min_annular_ring_mm:.3f}mm)"
-                    self._custom_via_status.configure(
-                        text=msg, text_color=CLR_WARNING
-                    )
-                elif c:
-                    self._custom_via_status.configure(
-                        text=f"✅ Valid (AR: {calc_ar:.3f})", 
-                        text_color=CLR_SUCCESS
-                    )
+                if c:
+                    ok, reason = check_via_compatibility(dia, drill, c)
+                    if not ok:
+                        self._custom_via_status.configure(
+                            text=f"⚠️ {reason}", text_color=CLR_WARNING
+                        )
+                    else:
+                        self._custom_via_status.configure(
+                            text=f"✅ {reason}", text_color=CLR_SUCCESS
+                        )
                 else:
                     self._custom_via_status.configure(
                         text="", text_color=CLR_SUBTEXT
@@ -1959,6 +1969,18 @@ class KiCadConfiguratorApp(ctk.CTk):
                 text="⚠️ Width must be > 0", text_color=CLR_WARNING
             )
             return
+            
+        with self._constraints_lock:
+            c = self._constraints
+            
+        if c and hasattr(self, "_restrict_custom_var") and self._restrict_custom_var.get():
+            ok, reason = check_track_compatibility(width, c)
+            if not ok:
+                self._custom_track_status.configure(
+                    text=f"⚠️ {reason}", text_color=CLR_WARNING
+                )
+                return
+
         # Check for duplicates
         if width in self._custom_tracks:
             self._custom_track_status.configure(
@@ -2004,6 +2026,17 @@ class KiCadConfiguratorApp(ctk.CTk):
             )
             return
             
+        with self._constraints_lock:
+            c = self._constraints
+            
+        if c and hasattr(self, "_restrict_custom_var") and self._restrict_custom_var.get():
+            ok, reason = check_track_compatibility(width, c)
+            if not ok:
+                self._custom_track_status.configure(
+                    text=f"⚠️ {reason}", text_color=CLR_WARNING
+                )
+                return
+
         # Add to library if not already there
         if width not in self._custom_tracks:
             self._custom_tracks.append(width)
@@ -2143,6 +2176,18 @@ class KiCadConfiguratorApp(ctk.CTk):
                 text="⚠️ Drill must be < diameter", text_color=CLR_WARNING
             )
             return
+            
+        with self._constraints_lock:
+            c = self._constraints
+            
+        if c and hasattr(self, "_restrict_custom_var") and self._restrict_custom_var.get():
+            ok, reason = check_via_compatibility(dia, drill, c)
+            if not ok:
+                self._custom_via_status.configure(
+                    text=f"⚠️ {reason}", text_color=CLR_WARNING
+                )
+                return
+
         # Check duplicates
         for existing in self._custom_vias:
             if abs(existing[0] - dia) < 0.0001 and abs(existing[1] - drill) < 0.0001:
@@ -2158,9 +2203,6 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._custom_via_drill_entry.delete(0, "end")
         self._custom_via_ar_entry.delete(0, "end")
         ar = (dia - drill) / 2
-        
-        with self._constraints_lock:
-            c = self._constraints
         
         if c and ar < c.min_annular_ring_mm:
             self._custom_via_status.configure(
@@ -2210,6 +2252,17 @@ class KiCadConfiguratorApp(ctk.CTk):
             )
             return
             
+        with self._constraints_lock:
+            c = self._constraints
+            
+        if c and hasattr(self, "_restrict_custom_var") and self._restrict_custom_var.get():
+            ok, reason = check_via_compatibility(dia, drill, c)
+            if not ok:
+                self._custom_via_status.configure(
+                    text=f"⚠️ {reason}", text_color=CLR_WARNING
+                )
+                return
+
         # Add to library if not already there
         is_duplicate = False
         for existing in self._custom_vias:
