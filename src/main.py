@@ -1510,9 +1510,11 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._vendor_compat_badge.pack(side="right", padx=4)
 
-        # ── Columns container ──────────────────────────────────────────
-        columns_frame = ctk.CTkScrollableFrame(self._presets_content, orientation="horizontal", fg_color="transparent")
+        # ── Columns container (Visible altogether) ─────────────────────
+        columns_frame = ctk.CTkFrame(self._presets_content, fg_color="transparent")
         columns_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        columns_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        columns_frame.grid_rowconfigure(0, weight=1)
         
         # Build four columns
         self._signal_col_frame = self._build_preset_column(
@@ -1566,10 +1568,9 @@ class KiCadConfiguratorApp(ctk.CTk):
         """Build a single column for the preset tab. Returns the scrollable inner frame."""
         outer = ctk.CTkFrame(
             parent, fg_color=CLR_CARD, corner_radius=10,
-            border_width=1, border_color=CLR_BORDER, width=280
+            border_width=1, border_color=CLR_BORDER
         )
-        outer.grid(row=0, column=col, padx=8, pady=4, sticky="ns")
-        outer.grid_propagate(False)
+        outer.grid(row=0, column=col, padx=4, pady=4, sticky="nsew")
 
         # Column header
         header = ctk.CTkFrame(outer, fg_color=accent_color, corner_radius=8, height=60)
@@ -1620,11 +1621,17 @@ class KiCadConfiguratorApp(ctk.CTk):
         # Store as an attribute so we can update it later
         outer._range_label = range_label  # type: ignore[attr-defined]
 
-        # Scrollable items area
-        items_frame = ctk.CTkScrollableFrame(
-            outer, fg_color="transparent", height=380,
+        # Horizontal scroll container (in case text clips)
+        h_frame = ctk.CTkScrollableFrame(
+            outer, fg_color="transparent", orientation="horizontal"
         )
-        items_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        h_frame.pack(fill="both", expand=True, padx=2, pady=(0, 4))
+
+        # Vertical scrollable items area (expands to the bottom)
+        items_frame = ctk.CTkScrollableFrame(
+            h_frame, fg_color="transparent", orientation="vertical"
+        )
+        items_frame.pack(fill="both", expand=True)
 
         return items_frame
 
