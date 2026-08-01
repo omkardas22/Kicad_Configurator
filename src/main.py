@@ -3400,8 +3400,8 @@ class KiCadConfiguratorApp(ctk.CTk):
             return
 
         # Count custom sizes for logging
-        n_custom_tracks = len(custom_tracks)
-        n_custom_vias = len(custom_vias)
+        n_custom_tracks = len(self._custom_tracks)
+        n_custom_vias = len(self._custom_vias)
 
         self._inject_btn.configure(state="disabled", text="⏳  Injecting …")
         self._log(f"{'─'*50}")
