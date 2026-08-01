@@ -1111,6 +1111,9 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._custom_track_widgets: list = []
         self._custom_via_widgets: list = []
 
+        # Starred AI models
+        self._starred_models: list[str] = self._config.get("starred_models", [])
+
         self._build_ui()
         self._restore_config()
         self._bind_shortcuts()
@@ -1491,26 +1494,31 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._vendor_compat_badge.pack(side="right", padx=4)
 
-        # ── Columns container ──────────────────────────────────────────
-        columns_frame = ctk.CTkScrollableFrame(self._presets_content, orientation="horizontal", fg_color="transparent")
-        columns_frame.pack(fill="both", expand=True, padx=4, pady=4)
-        columns_frame.columnconfigure((0, 1, 2, 3), weight=1, minsize=220)
+        # ── Tabview container ──────────────────────────────────────────
+        self._presets_tabview = ctk.CTkTabview(self._presets_content, fg_color="transparent")
+        self._presets_tabview.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Add tabs
+        self._presets_tabview.add("Signal Traces")
+        self._presets_tabview.add("Power Traces")
+        self._presets_tabview.add("Diff Pairs")
+        self._presets_tabview.add("Vias")
 
         # Build four columns
         self._signal_col_frame = self._build_preset_column(
-            columns_frame, 0, "Signal Traces", "📏", CLR_SIGNAL_COL,
+            self._presets_tabview.tab("Signal Traces"), "Signal Traces", "📏", CLR_SIGNAL_COL,
             "Track widths for signal routing"
         )
         self._power_col_frame = self._build_preset_column(
-            columns_frame, 1, "Power Traces", "⚡", CLR_POWER_COL,
+            self._presets_tabview.tab("Power Traces"), "Power Traces", "⚡", CLR_POWER_COL,
             "Track widths for power delivery"
         )
         self._diff_col_frame = self._build_preset_column(
-            columns_frame, 2, "Diff Pairs", "↔️", CLR_DIFF_COL,
+            self._presets_tabview.tab("Diff Pairs"), "Diff Pairs", "↔️", CLR_DIFF_COL,
             "Differential pair width / gap"
         )
         self._via_col_frame = self._build_preset_column(
-            columns_frame, 3, "Vias", "⭕", CLR_VIA_COL,
+            self._presets_tabview.tab("Vias"), "Vias", "⭕", CLR_VIA_COL,
             "Via diameter / drill / AR"
         )
 
@@ -1543,14 +1551,14 @@ class KiCadConfiguratorApp(ctk.CTk):
             text_color=CLR_SUBTEXT, anchor="w", justify="left",
         ).pack(padx=12, pady=8, anchor="w")
 
-    def _build_preset_column(self, parent, col: int, title: str, icon: str,
+    def _build_preset_column(self, parent, title: str, icon: str,
                               accent_color: str, subtitle: str) -> ctk.CTkFrame:
         """Build a single column for the preset tab. Returns the scrollable inner frame."""
         outer = ctk.CTkFrame(
             parent, fg_color=CLR_CARD, corner_radius=10,
             border_width=1, border_color=CLR_BORDER,
         )
-        outer.grid(row=0, column=col, padx=4, pady=4, sticky="nsew")
+        outer.pack(fill="both", expand=True, padx=4, pady=4)
 
         # Column header
         header = ctk.CTkFrame(outer, fg_color=accent_color, corner_radius=8, height=60)
@@ -2547,8 +2555,9 @@ class KiCadConfiguratorApp(ctk.CTk):
             )
 
     def _clear_model_list(self) -> None:
-        for rb in self._model_radio_buttons:
-            rb.destroy()
+        for child in self._model_scroll.winfo_children():
+            if child is not self._model_placeholder:
+                child.destroy()
         self._model_radio_buttons.clear()
         self._model_placeholder.pack(padx=8, pady=16)
         self._selected_model_label.configure(text="")
@@ -2571,27 +2580,66 @@ class KiCadConfiguratorApp(ctk.CTk):
             star_model = models[0]
 
         self._models_list = models
+        
+        # Sort models: starred first, then recommended, then the rest
+        def model_sort_key(m: str):
+            is_starred = m in self._starred_models
+            is_rec = m == star_model
+            # Priority: starred=0, recommended=1, others=2
+            priority = 0 if is_starred else (1 if is_rec else 2)
+            return (priority, m)
+            
+        sorted_models = sorted(models, key=model_sort_key)
 
-        for m in models:
+        for m in sorted_models:
+            is_starred = m in self._starred_models
             is_rec = (m == star_model)
-            label  = f"⭐ {m}  ← Recommended" if is_rec else m
-            color  = CLR_SUCCESS if is_rec else CLR_TEXT
+            
+            if is_starred:
+                label = f"{m}"
+                color = CLR_WARNING  # Gold/yellow for starred
+                font_weight = "bold"
+            elif is_rec:
+                label = f"{m}  ← Recommended"
+                color = CLR_SUCCESS
+                font_weight = "bold"
+            else:
+                label = m
+                color = CLR_TEXT
+                font_weight = "normal"
+                
+            row_frame = ctk.CTkFrame(self._model_scroll, fg_color="transparent")
+            row_frame.pack(fill="x", padx=4, pady=2)
+            
+            star_btn = ctk.CTkButton(
+                row_frame,
+                text="★" if is_starred else "☆",
+                width=24,
+                height=24,
+                font=ctk.CTkFont(size=14),
+                text_color=CLR_WARNING if is_starred else CLR_SUBTEXT,
+                fg_color="transparent",
+                hover_color=CLR_CARD,
+                command=lambda mod=m: self._toggle_star_model(mod)
+            )
+            star_btn.pack(side="left", padx=(0, 4))
+            
             rb = ctk.CTkRadioButton(
-                self._model_scroll,
+                row_frame,
                 text=label,
                 variable=self._selected_model_var,
                 value=m,
                 font=ctk.CTkFont(
                     family="Segoe UI",
                     size=11,
-                    weight="bold" if is_rec else "normal",
+                    weight=font_weight,
                 ),
                 text_color=color,
                 fg_color=CLR_ACCENT,
                 hover_color=CLR_ACCENT2,
                 command=self._on_model_select,
             )
-            rb.pack(anchor="w", padx=8, pady=2)
+            rb.pack(side="left", anchor="w")
             self._model_radio_buttons.append(rb)
 
         # Auto-select the previously saved model if it exists in the fetched list,
@@ -2602,6 +2650,20 @@ class KiCadConfiguratorApp(ctk.CTk):
         elif star_model:
             self._selected_model_var.set(star_model)
             self._on_model_select()
+
+    def _toggle_star_model(self, model: str) -> None:
+        if model in self._starred_models:
+            self._starred_models.remove(model)
+        else:
+            self._starred_models.append(model)
+            
+        # Save to config
+        self._config["starred_models"] = self._starred_models
+        save_config(self._config)
+        
+        # Re-render list
+        self._clear_model_list()
+        self._populate_model_list(self._models_list)
 
     def _on_model_select(self) -> None:
         model = self._selected_model_var.get()
