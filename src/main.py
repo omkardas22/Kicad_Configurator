@@ -663,7 +663,7 @@ def generate_signal_trace_presets(c: PCBConstraints) -> list[dict]:
         "Medium", "Wide", "Heavy", "Extra Heavy", "Maximum",
     ]
     return [
-        {"name": f"⭐ Signal {names[i]}", "track_width": w, "category": "signal"}
+        {"name": f"Signal {names[i]}", "track_width": w, "category": "signal", "is_ai": True}
         for i, w in enumerate(widths)
     ]
 
@@ -678,7 +678,7 @@ def generate_power_trace_presets(c: PCBConstraints) -> list[dict]:
         "High", "Heavy", "Extra Heavy", "Ultra Heavy", "Maximum",
     ]
     return [
-        {"name": f"⭐ Power {names[i]}", "track_width": w, "category": "power"}
+        {"name": f"Power {names[i]}", "track_width": w, "category": "power", "is_ai": True}
         for i, w in enumerate(widths)
     ]
 
@@ -697,10 +697,11 @@ def generate_diff_pair_presets(c: PCBConstraints) -> list[dict]:
     ]
     return [
         {
-            "name": f"⭐ Diff {names[i]}",
+            "name": f"Diff {names[i]}",
             "diff_width": w,
             "diff_gap": g,
             "category": "diff_pair",
+            "is_ai": True
         }
         for i, (w, g) in enumerate(zip(widths, gaps))
     ]
@@ -1510,6 +1511,15 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._vendor_compat_badge.pack(side="right", padx=4)
 
+        self._ai_preset_btn = ctk.CTkButton(
+            header_row, text="🧠 AI Generate Presets",
+            fg_color="#32CD32", hover_color="#228B22",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="white", width=120, height=24,
+            command=self._on_ai_generate_btn
+        )
+        self._ai_preset_btn.pack(side="right", padx=(4, 8))
+
         # ── Columns container (Visible altogether) ─────────────────────
         columns_frame = ctk.CTkFrame(self._presets_content, fg_color="transparent")
         columns_frame.pack(fill="both", expand=True, padx=4, pady=4)
@@ -2062,8 +2072,8 @@ class KiCadConfiguratorApp(ctk.CTk):
             if any(abs(p["track_width"] - width) < 0.0001 for p in self._signal_presets):
                 continue
             
-            self._signal_presets.append({"name": f"🟡 Custom {width}mm", "track_width": width, "category": "signal", "is_manual": True})
-            self._power_presets.append({"name": f"🟡 Custom {width}mm", "track_width": width, "category": "power", "is_manual": True})
+            self._signal_presets.append({"name": f"Custom {width}mm", "track_width": width, "category": "signal", "is_manual": True})
+            self._power_presets.append({"name": f"Custom {width}mm", "track_width": width, "category": "power", "is_manual": True})
             added += 1
             
         if added > 0:
@@ -2298,7 +2308,7 @@ class KiCadConfiguratorApp(ctk.CTk):
                 continue
                 
             self._via_presets.append({
-                "name": f"🟡 Custom {dia}/{drill}mm",
+                "name": f"Custom {dia}/{drill}mm",
                 "via_dia": dia,
                 "via_drill": drill,
                 "annular_ring": round((dia - drill) / 2, 4),
@@ -2614,12 +2624,29 @@ class KiCadConfiguratorApp(ctk.CTk):
     # Preset Generation & Rendering (Column-based)
     # ------------------------------------------------------------------
 
+    def _on_ai_generate_btn(self) -> None:
+        """User explicitly requested AI generation of presets."""
+        if not self._constraints:
+            messagebox.showwarning("Missing Constraints", "Please run 'Scrape & Extract' first to get manufacturer constraints.")
+            return
+        
+        # Call the existing generation logic
+        self._generate_all_presets(self._constraints)
+        self._render_all_presets(self._constraints)
+        
+        self._log("🤖 User triggered AI Generate Presets.")
+
     def _generate_all_presets(self, c: PCBConstraints) -> None:
-        """Generate 10 presets for each category."""
-        self._signal_presets = generate_signal_trace_presets(c)
-        self._power_presets  = generate_power_trace_presets(c)
-        self._diff_presets   = generate_diff_pair_presets(c)
-        self._via_presets    = generate_via_presets(c)
+        """Generate presets for each category, preserving existing custom presets (>10 allowed)."""
+        custom_sig = [p for p in self._signal_presets if p.get("is_manual")]
+        custom_pwr = [p for p in self._power_presets if p.get("is_manual")]
+        custom_diff = [p for p in self._diff_presets if p.get("is_manual")]
+        custom_via = [p for p in self._via_presets if p.get("is_manual")]
+
+        self._signal_presets = generate_signal_trace_presets(c) + custom_sig
+        self._power_presets  = generate_power_trace_presets(c) + custom_pwr
+        self._diff_presets   = generate_diff_pair_presets(c) + custom_diff
+        self._via_presets    = generate_via_presets(c) + custom_via
 
     def _render_all_presets(self, c: PCBConstraints) -> None:
         """Render all four columns of presets."""
@@ -2757,16 +2784,22 @@ class KiCadConfiguratorApp(ctk.CTk):
                 ).pack(side="left", padx=(2, 0))
 
             # Preset name (smaller)
-            name_text = preset["name"].split(" ", 1)[-1] if " " in preset["name"] else preset["name"]
+            name_text = preset["name"]
             is_manual = preset.get("is_manual", False)
+            is_ai = preset.get("is_ai", False)
+            
             if is_manual:
-                name_text = f"🟡 {name_text}"
+                text_color = "#FF69B4"  # Pink for custom
+            elif is_ai:
+                text_color = "#32CD32"  # Green for AI generated
+            else:
+                text_color = CLR_SUBTEXT
             
             ctk.CTkLabel(
                 row_frame,
                 text=name_text,
-                font=ctk.CTkFont(family="Segoe UI", size=9),
-                text_color=CLR_WARNING if is_manual else CLR_SUBTEXT, anchor="e",
+                font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold" if (is_manual or is_ai) else "normal"),
+                text_color=text_color, anchor="e",
             ).pack(side="right", padx=(4, 2))
 
         return vars_list
