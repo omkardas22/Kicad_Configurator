@@ -1784,6 +1784,16 @@ class KiCadConfiguratorApp(ctk.CTk):
         via_input_row2 = ctk.CTkFrame(via_section, fg_color="transparent")
         via_input_row2.pack(fill="x", padx=16, pady=(2, 4))
 
+        self._custom_via_freeform_var = ctk.BooleanVar(value=False)
+        self._custom_via_freeform_cb = ctk.CTkCheckBox(
+            via_input_row2, text="Freeform",
+            variable=self._custom_via_freeform_var,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            width=60,
+            command=lambda: self._update_via_ar_preview(None)
+        )
+        self._custom_via_freeform_cb.pack(side="left", padx=(0, 12))
+
         ctk.CTkLabel(
             via_input_row2, text="Annular Ring:",
             font=ctk.CTkFont(family="Segoe UI", size=11),
@@ -1861,32 +1871,34 @@ class KiCadConfiguratorApp(ctk.CTk):
         drill = float(drill_str) if drill_str else None
         ar = float(ar_str) if ar_str else None
 
-        # Auto-calculate missing or dependent fields
-        try:
-            if source_field == "dia" and dia is not None:
-                current_ar = ar if ar is not None else default_ar
-                drill = dia - 2 * current_ar
-                if drill > 0:
-                    self._custom_via_drill_entry.delete(0, "end")
-                    self._custom_via_drill_entry.insert(0, f"{drill:.3f}")
-            elif source_field == "drill" and drill is not None:
-                current_ar = ar if ar is not None else default_ar
-                dia = drill + 2 * current_ar
-                if dia > 0:
-                    self._custom_via_dia_entry.delete(0, "end")
-                    self._custom_via_dia_entry.insert(0, f"{dia:.3f}")
-            elif source_field == "ar" and ar is not None:
-                if drill is not None:
-                    dia = drill + 2 * ar
-                    self._custom_via_dia_entry.delete(0, "end")
-                    self._custom_via_dia_entry.insert(0, f"{dia:.3f}")
-                elif dia is not None:
-                    drill = dia - 2 * ar
+        # Auto-calculate missing or dependent fields if not in Freeform mode
+        is_freeform = getattr(self, "_custom_via_freeform_var", None) and self._custom_via_freeform_var.get()
+        if not is_freeform:
+            try:
+                if source_field == "dia" and dia is not None:
+                    current_ar = ar if ar is not None else default_ar
+                    drill = dia - 2 * current_ar
                     if drill > 0:
                         self._custom_via_drill_entry.delete(0, "end")
                         self._custom_via_drill_entry.insert(0, f"{drill:.3f}")
-        except Exception:
-            pass
+                elif source_field == "drill" and drill is not None:
+                    current_ar = ar if ar is not None else default_ar
+                    dia = drill + 2 * current_ar
+                    if dia > 0:
+                        self._custom_via_dia_entry.delete(0, "end")
+                        self._custom_via_dia_entry.insert(0, f"{dia:.3f}")
+                elif source_field == "ar" and ar is not None:
+                    if drill is not None:
+                        dia = drill + 2 * ar
+                        self._custom_via_dia_entry.delete(0, "end")
+                        self._custom_via_dia_entry.insert(0, f"{dia:.3f}")
+                    elif dia is not None:
+                        drill = dia - 2 * ar
+                        if drill > 0:
+                            self._custom_via_drill_entry.delete(0, "end")
+                            self._custom_via_drill_entry.insert(0, f"{drill:.3f}")
+            except Exception:
+                pass
 
         # Re-read after auto-calc to show warnings
         dia_str = self._custom_via_dia_entry.get().strip()
@@ -1899,9 +1911,9 @@ class KiCadConfiguratorApp(ctk.CTk):
             if dia is not None and drill is not None:
                 calc_ar = (dia - drill) / 2
                 if c and calc_ar < c.min_annular_ring_mm:
+                    msg = f"⚠️ AR < Manufacturer Min ({c.min_annular_ring_mm:.3f}mm)"
                     self._custom_via_status.configure(
-                        text=f"⚠️ AR < min ({c.min_annular_ring_mm:.3f})", 
-                        text_color=CLR_WARNING
+                        text=msg, text_color=CLR_WARNING
                     )
                 elif c:
                     self._custom_via_status.configure(
