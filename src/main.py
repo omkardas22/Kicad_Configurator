@@ -757,8 +757,8 @@ def generate_via_presets(c: PCBConstraints) -> list[dict]:
         else:
             d = round(target_dia, 4)
             dr = round(target_dr, 4)
-            if (d - dr) / 2 < min_ar:
-                d = round(dr + 2 * min_ar, 4)
+            if round((d - dr) / 2, 4) < min_ar:
+                d = round(dr + 2 * min_ar + 0.0001, 4)
                 
             # Guarantee uniqueness for math fallbacks
             while (d, dr) in seen:
@@ -773,6 +773,7 @@ def generate_via_presets(c: PCBConstraints) -> list[dict]:
             "via_drill": dr,
             "annular_ring": round((d - dr) / 2, 4),
             "category": "via",
+            "is_ai": True
         })
     
     return presets
@@ -2325,8 +2326,10 @@ class KiCadConfiguratorApp(ctk.CTk):
             
             self._via_vars = self._render_column(
                 self._via_col_frame, self._via_presets,
-                value_fmt=lambda p: f"D:{p['via_dia']:.2f} H:{p['via_drill']:.2f} AR:{p['annular_ring']:.3f}",
+                value_fmt=lambda p: f"D{p['via_dia']:.2f}/H{p['via_drill']:.2f}",
                 default_indices=via_sel,
+                extra_fmt=lambda p: f"AR{p.get('annular_ring', 0):.2f}",
+                ar_constraints=self._constraints,
             )
 
     def _remove_custom_via(self, dia: float, drill: float) -> None:
@@ -2703,9 +2706,9 @@ class KiCadConfiguratorApp(ctk.CTk):
         # Vias now show annular ring
         self._via_vars = self._render_column(
             self._via_col_frame, self._via_presets,
-            value_fmt=lambda p: f"D:{p['via_dia']:.3f} H:{p['via_drill']:.3f}",
+            value_fmt=lambda p: f"D{p['via_dia']:.2f}/H{p['via_drill']:.2f}",
             default_indices={0, 2, 4, 6, 9},
-            extra_fmt=lambda p: f"AR:{p.get('annular_ring', 0):.3f}",
+            extra_fmt=lambda p: f"AR{p.get('annular_ring', 0):.2f}",
             ar_constraints=c,
         )
         self._update_range_label(
@@ -2784,7 +2787,7 @@ class KiCadConfiguratorApp(ctk.CTk):
                 ).pack(side="left", padx=(2, 0))
 
             # Preset name (smaller)
-            name_text = preset["name"]
+            name_text = preset["name"].replace("Signal ", "").replace("Power ", "").replace("Diff ", "").replace("Via ", "").replace("Custom ", "C ")
             is_manual = preset.get("is_manual", False)
             is_ai = preset.get("is_ai", False)
             
