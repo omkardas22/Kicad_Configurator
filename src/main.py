@@ -2561,6 +2561,9 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         pid = self._current_provider_id()
         recommended = PROVIDER_MAP[pid]["recommended"]
+        
+        # Check if the user previously saved a model for this provider
+        saved_model = self._config.get("ai_model", "")
 
         # Determine best recommendation that exists in the fetched list
         star_model = next((m for m in recommended if m in models), None)
@@ -2591,8 +2594,12 @@ class KiCadConfiguratorApp(ctk.CTk):
             rb.pack(anchor="w", padx=8, pady=2)
             self._model_radio_buttons.append(rb)
 
-        # Auto-select the recommended model
-        if star_model:
+        # Auto-select the previously saved model if it exists in the fetched list,
+        # otherwise fallback to the recommended model.
+        if saved_model and saved_model in models:
+            self._selected_model_var.set(saved_model)
+            self._on_model_select()
+        elif star_model:
             self._selected_model_var.set(star_model)
             self._on_model_select()
 
