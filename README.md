@@ -71,30 +71,61 @@ python src/main.py
 
 ---
 
-## 📋 Usage Guide
+## 📋 Comprehensive Usage Guide
 
-### Step 1 — Enter API Key
-Enter your Google Gemini API key in the **🔑 Gemini API Key** field and click **Save Key**. The key is stored encrypted in `%APPDATA%\KiCadConfigurator\config.json`.
+The application is split into several main tabs to keep your workflow organized:
 
-### Step 2 — Enter Vendor URL
-Paste the manufacturer's PCB capability page URL. Use the quick-fill buttons for JLCPCB or PCBWay.
+### 🏠 Home Tab
+The primary control center for extracting constraints and injecting them into your project.
 
-**Example URLs:**
-- JLCPCB: `https://jlcpcb.com/capabilities/pcb`
-- PCBWay: `https://www.pcbway.com/capabilities.html`
+*   **🔑 Gemini API Key**: Enter your Google Gemini API key. 
+    *   **Save Key**: Encrypts and saves your key to `%APPDATA%`.
+    *   **Show / Hide Key**: Toggles the visibility of your API key.
+*   **🧠 AI Model**:
+    *   **Dropdown**: Select the specific Gemini model to use for extraction (defaults to `gemini-2.5-flash`).
+    *   **🔄 Fetch Models**: Queries Google's servers to fetch the latest available AI models.
+    *   **⭐ Star Button**: Pins the currently selected model to the top of the list so it survives restarts.
+*   **🌐 Vendor Capability URL**: Paste the URL of the manufacturer's capability page here.
+    *   **JLCPCB / PCBWay Quick Fill**: Instantly pastes the default URL for these common manufacturers.
+*   **📂 Output Directory & Project Name**:
+    *   **Browse**: Opens a folder selection dialog to choose where your project will be created.
+    *   **Project Name**: The name of the `.kicad_pro` and `.kicad_pcb` files to generate.
+*   **Action Buttons**:
+    *   **🔍 Scrape & Extract Constraints**: Downloads the URL and uses AI to extract physical constraints (minimum track, drill size, etc.).
+    *   **💉 Inject into KiCad Files**: Generates a new KiCad project in the output directory, heavily configuring it with the extracted constraints and all selected presets.
 
-### Step 3 — Scrape & Extract
-Click **🔍 Scrape & Extract Constraints**. The app will:
-- Fetch and parse the vendor page
-- Send the text to Gemini AI for structured extraction
-- Display the results in the **📊 Results** tab
+### 📐 Presets Tab
+This tab lets you select which pre-configured trace widths and via sizes will be injected into your KiCad project.
 
-### Step 4 — Set Output & Inject
-1. Set your **Output Directory** (where the KiCad project folder will be created)
-2. Set your **Project Name**
-3. Click **💉 Inject into KiCad Files**
+*   **The Columns**: 
+    *   **Signal Traces**: For general logic and routing.
+    *   **Power Traces**: Thicker traces designed for power delivery.
+    *   **Diff Pairs**: Paired traces for high-speed signals (like USB or CAN_Bus).
+    *   **Vias**: Drill and diameter configurations that are strictly verified against the manufacturer's Minimum Annular Ring constraint.
+*   **Column Buttons**:
+    *   **All**: Instantly checks every preset box in that column.
+    *   **None**: Instantly clears all checked boxes in that column.
+*   **🧠 AI Generate Presets**: A powerful button that asks the AI to intelligently calculate 10 unique, scaled values for every column based on the manufacturer's absolute minimum capabilities. 
+    *   AI-generated presets appear with **Green** labels.
+    *   Custom-made presets appear with **Pink** labels.
 
-The app copies the KiCad templates, renames them to your project name, and injects all constraints.
+### ⚙️ Custom Tab
+If the AI-generated presets aren't exactly what you want, you can create your own here.
+
+*   **Custom Tracks**:
+    *   **+ Add Track**: Adds the track width to the local list below.
+    *   **Add track preset**: Pushes the current track width *directly* into the **Presets Tab**, tagging it as a Custom preset (Pink text).
+    *   **Clear All**: Deletes all custom tracks from the list.
+*   **Custom Vias**:
+    *   **Freeform Checkbox**: By default, entering a hole size auto-calculates the diameter to maintain the minimum annular ring. Checking "Freeform" disables auto-calculation, letting you manually input both sizes (though it will still warn you if you violate manufacturer constraints!).
+    *   **+ Add Via**: Adds the via configuration to the local list below.
+    *   **Add via preset**: Pushes the via configuration *directly* into the **Presets Tab**, tagging it as a Custom preset (Pink text).
+    *   **Clear All**: Deletes all custom vias.
+
+### 📜 Log Tab
+View real-time backend operations, errors, and JSON responses from the AI.
+*   **Export Log**: Saves the entire console history to a `.txt` file.
+*   **Clear Log**: Wipes the console clean.
 
 ---
 
