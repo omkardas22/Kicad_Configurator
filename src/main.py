@@ -1427,6 +1427,7 @@ class KiCadConfiguratorApp(ctk.CTk):
             segmented_button_unselected_color=CLR_BG,
             segmented_button_unselected_hover_color=CLR_BORDER,
             text_color=CLR_TEXT,
+            command=self._on_main_tab_changed,
         )
         self._tabs.pack(fill="both", expand=True, padx=12, pady=12)
 
@@ -1441,6 +1442,12 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._build_custom_sizes_tab(self._tabs.tab("⚙️ Custom"))
         self._build_log_tab(self._tabs.tab("📋 Log"))
         self._build_about_tab(self._tabs.tab("ℹ️ About"))
+
+    def _on_main_tab_changed(self) -> None:
+        """When the user clicks another tab, refresh the model list if needed so starred models rise to top."""
+        if self._models_list:
+            self._clear_model_list()
+            self._populate_model_list(self._models_list)
 
     def _build_results_tab(self, parent) -> None:
         self._results_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")
@@ -2620,7 +2627,6 @@ class KiCadConfiguratorApp(ctk.CTk):
                 text_color=CLR_WARNING if is_starred else CLR_SUBTEXT,
                 fg_color="transparent",
                 hover_color=CLR_CARD,
-                command=lambda mod=m: self._toggle_star_model(mod)
             )
             star_btn.pack(side="left", padx=(0, 4))
             
@@ -2641,6 +2647,9 @@ class KiCadConfiguratorApp(ctk.CTk):
             )
             rb.pack(side="left", anchor="w")
             self._model_radio_buttons.append(rb)
+            
+            # Bind the toggle action with widgets after both are created
+            star_btn.configure(command=lambda mod=m, b=star_btn, r=rb: self._toggle_star_model(mod, b, r))
 
         # Auto-select the previously saved model if it exists in the fetched list,
         # otherwise fallback to the recommended model.
@@ -2651,19 +2660,31 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._selected_model_var.set(star_model)
             self._on_model_select()
 
-    def _toggle_star_model(self, model: str) -> None:
+    def _toggle_star_model(self, model: str, star_btn: ctk.CTkButton, rb: ctk.CTkRadioButton) -> None:
+        """Toggle star status and apply visual update in-place without refreshing the whole list immediately."""
+        pid = self._current_provider_id()
+        is_rec = (model == next((m for m in PROVIDER_MAP[pid]["recommended"] if m in self._models_list), None) or 
+                  (self._models_list and model == self._models_list[0]))
+
         if model in self._starred_models:
             self._starred_models.remove(model)
+            # Update visuals to unstarred
+            star_btn.configure(text="☆", text_color=CLR_SUBTEXT)
+            
+            # Revert label and color based on whether it is recommended
+            if is_rec:
+                rb.configure(text=f"{model}  ← Recommended", text_color=CLR_SUCCESS, font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
+            else:
+                rb.configure(text=model, text_color=CLR_TEXT, font=ctk.CTkFont(family="Segoe UI", size=11, weight="normal"))
         else:
             self._starred_models.append(model)
+            # Update visuals to starred
+            star_btn.configure(text="★", text_color=CLR_WARNING)
+            rb.configure(text=f"{model}", text_color=CLR_WARNING, font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
             
         # Save to config
         self._config["starred_models"] = self._starred_models
         save_config(self._config)
-        
-        # Re-render list
-        self._clear_model_list()
-        self._populate_model_list(self._models_list)
 
     def _on_model_select(self) -> None:
         model = self._selected_model_var.get()
