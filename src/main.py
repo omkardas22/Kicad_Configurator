@@ -709,7 +709,8 @@ def generate_diff_pair_presets(c: PCBConstraints) -> list[dict]:
 def generate_via_presets(c: PCBConstraints) -> list[dict]:
     """Generate 10 via size presets ensuring annular ring compliance.
     First 3 configurations match min AR closely.
-    Matches against standard via sizes (diameter, drill).
+    Matches against standard via sizes (diameter, drill) where possible,
+    falling back to mathematical steps to ensure uniqueness.
     """
     min_ar = max(c.min_annular_ring_mm, 0.05)
     mn_dr = max(c.min_via_drill_mm, 0.1)
@@ -728,6 +729,7 @@ def generate_via_presets(c: PCBConstraints) -> list[dict]:
     ]
 
     presets = []
+    seen = set()
     
     for i in range(10):
         if i < 3:
@@ -749,13 +751,20 @@ def generate_via_presets(c: PCBConstraints) -> list[dict]:
                     best_score = score
                     best_std = (sd, sdr)
         
-        if best_std and best_score < 0.3:
+        if best_std and best_score < 0.3 and best_std not in seen:
             d, dr = best_std
         else:
             d = round(target_dia, 4)
             dr = round(target_dr, 4)
             if (d - dr) / 2 < min_ar:
                 d = round(dr + 2 * min_ar, 4)
+                
+            # Guarantee uniqueness for math fallbacks
+            while (d, dr) in seen:
+                dr = round(dr + 0.025, 4)
+                d = round(d + 0.05, 4)
+                
+        seen.add((d, dr))
 
         presets.append({
             "name": f"Via {names[i]}",
@@ -1501,31 +1510,25 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._vendor_compat_badge.pack(side="right", padx=4)
 
-        # ── Tabview container ──────────────────────────────────────────
-        self._presets_tabview = ctk.CTkTabview(self._presets_content, fg_color="transparent")
-        self._presets_tabview.pack(fill="both", expand=True, padx=4, pady=4)
-
-        # Add tabs
-        self._presets_tabview.add("Signal Traces")
-        self._presets_tabview.add("Power Traces")
-        self._presets_tabview.add("Diff Pairs")
-        self._presets_tabview.add("Vias")
-
+        # ── Columns container ──────────────────────────────────────────
+        columns_frame = ctk.CTkScrollableFrame(self._presets_content, orientation="horizontal", fg_color="transparent")
+        columns_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        
         # Build four columns
         self._signal_col_frame = self._build_preset_column(
-            self._presets_tabview.tab("Signal Traces"), "Signal Traces", "📏", CLR_SIGNAL_COL,
+            columns_frame, 0, "Signal Traces", "📏", CLR_SIGNAL_COL,
             "Track widths for signal routing"
         )
         self._power_col_frame = self._build_preset_column(
-            self._presets_tabview.tab("Power Traces"), "Power Traces", "⚡", CLR_POWER_COL,
+            columns_frame, 1, "Power Traces", "⚡", CLR_POWER_COL,
             "Track widths for power delivery"
         )
         self._diff_col_frame = self._build_preset_column(
-            self._presets_tabview.tab("Diff Pairs"), "Diff Pairs", "↔️", CLR_DIFF_COL,
+            columns_frame, 2, "Diff Pairs", "↔️", CLR_DIFF_COL,
             "Differential pair width / gap"
         )
         self._via_col_frame = self._build_preset_column(
-            self._presets_tabview.tab("Vias"), "Vias", "⭕", CLR_VIA_COL,
+            columns_frame, 3, "Vias", "⭕", CLR_VIA_COL,
             "Via diameter / drill / AR"
         )
 
@@ -1558,14 +1561,15 @@ class KiCadConfiguratorApp(ctk.CTk):
             text_color=CLR_SUBTEXT, anchor="w", justify="left",
         ).pack(padx=12, pady=8, anchor="w")
 
-    def _build_preset_column(self, parent, title: str, icon: str,
+    def _build_preset_column(self, parent, col: int, title: str, icon: str,
                               accent_color: str, subtitle: str) -> ctk.CTkFrame:
         """Build a single column for the preset tab. Returns the scrollable inner frame."""
         outer = ctk.CTkFrame(
             parent, fg_color=CLR_CARD, corner_radius=10,
-            border_width=1, border_color=CLR_BORDER,
+            border_width=1, border_color=CLR_BORDER, width=280
         )
-        outer.pack(fill="both", expand=True, padx=4, pady=4)
+        outer.grid(row=0, column=col, padx=8, pady=4, sticky="ns")
+        outer.grid_propagate(False)
 
         # Column header
         header = ctk.CTkFrame(outer, fg_color=accent_color, corner_radius=8, height=60)
@@ -1766,12 +1770,19 @@ class KiCadConfiguratorApp(ctk.CTk):
         via_input_row2 = ctk.CTkFrame(via_section, fg_color="transparent")
         via_input_row2.pack(fill="x", padx=16, pady=(2, 4))
 
-        self._custom_via_ar_label = ctk.CTkLabel(
-            via_input_row2, text="Annular Ring: —",
-            font=ctk.CTkFont(family="Consolas", size=11),
-            text_color=CLR_SUBTEXT,
+        ctk.CTkLabel(
+            via_input_row2, text="Annular Ring:",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT,
+        ).pack(side="left", padx=(0, 6))
+
+        self._custom_via_ar_entry = ctk.CTkEntry(
+            via_input_row2, width=80,
+            placeholder_text="Override",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=CLR_BG, border_color=CLR_BORDER, text_color=CLR_TEXT,
         )
-        self._custom_via_ar_label.pack(side="left", padx=(0, 12))
+        self._custom_via_ar_entry.pack(side="left", padx=(0, 12))
 
         ctk.CTkButton(
             via_input_row2, text="+ Add Via", width=100,
@@ -1788,8 +1799,9 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._custom_via_status.pack(side="left")
 
         # Live annular ring calculation as user types
-        self._custom_via_dia_entry.bind("<KeyRelease>", self._update_via_ar_preview)
-        self._custom_via_drill_entry.bind("<KeyRelease>", self._update_via_ar_preview)
+        self._custom_via_dia_entry.bind("<KeyRelease>", lambda e: self._update_via_ar_preview("dia"))
+        self._custom_via_drill_entry.bind("<KeyRelease>", lambda e: self._update_via_ar_preview("drill"))
+        self._custom_via_ar_entry.bind("<KeyRelease>", lambda e: self._update_via_ar_preview("ar"))
 
         # Via list container
         self._custom_via_list_frame = ctk.CTkFrame(
@@ -1803,9 +1815,9 @@ class KiCadConfiguratorApp(ctk.CTk):
         info_frame.pack(fill="x", padx=12, pady=(4, 12))
         ctk.CTkLabel(
             info_frame,
-            text="ℹ️  Compatible custom sizes are automatically included during injection.\n"
-                 "     Incompatible entries are shown with ❌ and will be skipped.\n"
-                 "     Custom sizes are saved and persist across sessions.",
+            text="ℹ️  Custom sizes are saved and persist across sessions.\n"
+                 "     Sizes below minimum manufacturer constraints are shown with ⚠️\n"
+                 "     but will still be injected if selected (override mode).",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=CLR_SUBTEXT, anchor="w", justify="left",
         ).pack(padx=12, pady=8, anchor="w")
@@ -1814,39 +1826,75 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._render_custom_tracks()
         self._render_custom_vias()
 
-    def _update_via_ar_preview(self, event=None) -> None:
-        """Live-update the annular ring display as user types diameter/drill."""
+    def _update_via_ar_preview(self, source_field: str = None) -> None:
+        """Live-update via fields based on which one the user typed in."""
+        with self._constraints_lock:
+            c = self._constraints
+        default_ar = c.min_annular_ring_mm if c else 0.1
+        
+        dia_str = self._custom_via_dia_entry.get().strip()
+        drill_str = self._custom_via_drill_entry.get().strip()
+        ar_str = self._custom_via_ar_entry.get().strip()
+        
+        dia = float(dia_str) if dia_str else None
+        drill = float(drill_str) if drill_str else None
+        ar = float(ar_str) if ar_str else None
+
+        # Auto-calculate missing or dependent fields
         try:
-            dia = float(self._custom_via_dia_entry.get().strip())
-            drill = float(self._custom_via_drill_entry.get().strip())
-            if drill >= dia or dia <= 0 or drill <= 0:
-                self._custom_via_ar_label.configure(
-                    text="Annular Ring: ⚠️ Invalid", text_color=CLR_ERROR
-                )
-                return
-            ar = (dia - drill) / 2
-            # Check against constraints if available
-            with self._constraints_lock:
-                c = self._constraints
-            if c and ar < c.min_annular_ring_mm:
-                self._custom_via_ar_label.configure(
-                    text=f"Annular Ring: {ar:.3f} mm ❌ (min: {c.min_annular_ring_mm:.3f})",
-                    text_color=CLR_ERROR,
-                )
-            elif c:
-                self._custom_via_ar_label.configure(
-                    text=f"Annular Ring: {ar:.3f} mm ✅",
-                    text_color=CLR_SUCCESS,
-                )
+            if source_field == "dia" and dia is not None:
+                current_ar = ar if ar is not None else default_ar
+                drill = dia - 2 * current_ar
+                if drill > 0:
+                    self._custom_via_drill_entry.delete(0, "end")
+                    self._custom_via_drill_entry.insert(0, f"{drill:.3f}")
+            elif source_field == "drill" and drill is not None:
+                current_ar = ar if ar is not None else default_ar
+                dia = drill + 2 * current_ar
+                if dia > 0:
+                    self._custom_via_dia_entry.delete(0, "end")
+                    self._custom_via_dia_entry.insert(0, f"{dia:.3f}")
+            elif source_field == "ar" and ar is not None:
+                if drill is not None:
+                    dia = drill + 2 * ar
+                    self._custom_via_dia_entry.delete(0, "end")
+                    self._custom_via_dia_entry.insert(0, f"{dia:.3f}")
+                elif dia is not None:
+                    drill = dia - 2 * ar
+                    if drill > 0:
+                        self._custom_via_drill_entry.delete(0, "end")
+                        self._custom_via_drill_entry.insert(0, f"{drill:.3f}")
+        except Exception:
+            pass
+
+        # Re-read after auto-calc to show warnings
+        dia_str = self._custom_via_dia_entry.get().strip()
+        drill_str = self._custom_via_drill_entry.get().strip()
+        
+        try:
+            dia = float(dia_str) if dia_str else None
+            drill = float(drill_str) if drill_str else None
+            
+            if dia is not None and drill is not None:
+                calc_ar = (dia - drill) / 2
+                if c and calc_ar < c.min_annular_ring_mm:
+                    self._custom_via_status.configure(
+                        text=f"⚠️ AR < min ({c.min_annular_ring_mm:.3f})", 
+                        text_color=CLR_WARNING
+                    )
+                elif c:
+                    self._custom_via_status.configure(
+                        text=f"✅ Valid (AR: {calc_ar:.3f})", 
+                        text_color=CLR_SUCCESS
+                    )
+                else:
+                    self._custom_via_status.configure(
+                        text="", text_color=CLR_SUBTEXT
+                    )
             else:
-                self._custom_via_ar_label.configure(
-                    text=f"Annular Ring: {ar:.3f} mm (no constraints loaded)",
-                    text_color=CLR_WARNING,
-                )
-        except (ValueError, TypeError):
-            self._custom_via_ar_label.configure(
-                text="Annular Ring: —", text_color=CLR_SUBTEXT
-            )
+                self._custom_via_status.configure(text="", text_color=CLR_SUBTEXT)
+        except Exception:
+            self._custom_via_status.configure(text="", text_color=CLR_SUBTEXT)
 
     def _add_custom_track(self) -> None:
         """Add a custom track width from the entry field."""
@@ -1990,12 +2038,22 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._render_custom_vias()
         self._custom_via_dia_entry.delete(0, "end")
         self._custom_via_drill_entry.delete(0, "end")
+        self._custom_via_ar_entry.delete(0, "end")
         ar = (dia - drill) / 2
-        self._custom_via_status.configure(
-            text=f"✅ Added D:{dia:.3f} H:{drill:.3f} AR:{ar:.3f}",
-            text_color=CLR_SUCCESS,
-        )
-        self._custom_via_ar_label.configure(text="Annular Ring: —", text_color=CLR_SUBTEXT)
+        
+        with self._constraints_lock:
+            c = self._constraints
+        
+        if c and ar < c.min_annular_ring_mm:
+            self._custom_via_status.configure(
+                text=f"⚠️ Added Override D:{dia:.3f} H:{drill:.3f} AR:{ar:.3f}",
+                text_color=CLR_WARNING,
+            )
+        else:
+            self._custom_via_status.configure(
+                text=f"✅ Added D:{dia:.3f} H:{drill:.3f} AR:{ar:.3f}",
+                text_color=CLR_SUCCESS,
+            )
 
     def _remove_custom_via(self, dia: float, drill: float) -> None:
         """Remove a custom via size."""
@@ -2041,8 +2099,8 @@ class KiCadConfiguratorApp(ctk.CTk):
             # Compatibility status
             if c:
                 ok, reason = check_via_compatibility(dia, drill, c)
-                status_text = f"✅ {reason}" if ok else f"❌ {reason}"
-                status_color = CLR_SUCCESS if ok else CLR_ERROR
+                status_text = f"✅ {reason}" if ok else f"⚠️ Override ({reason})"
+                status_color = CLR_SUCCESS if ok else CLR_WARNING
             else:
                 status_text = "— No constraints"
                 status_color = CLR_SUBTEXT
@@ -2069,31 +2127,21 @@ class KiCadConfiguratorApp(ctk.CTk):
         save_config(self._config)
 
     def _get_compatible_custom_tracks(self) -> list[float]:
-        """Return custom track widths that pass compatibility check."""
-        with self._constraints_lock:
-            c = self._constraints
-        if c is None:
-            return []
-        return [w for w in self._custom_tracks if check_track_compatibility(w, c)[0]]
+        """Return all custom track widths (overrides included)."""
+        return self._custom_tracks
 
     def _get_compatible_custom_vias(self) -> list[dict]:
-        """Return custom via sizes that pass compatibility check, as preset dicts."""
-        with self._constraints_lock:
-            c = self._constraints
-        if c is None:
-            return []
+        """Return all custom via sizes as preset dicts (overrides included)."""
         result = []
         for via in self._custom_vias:
             dia, drill = via[0], via[1]
-            ok, _ = check_via_compatibility(dia, drill, c)
-            if ok:
-                result.append({
-                    "name": f"Custom D{dia:.2f}",
-                    "via_dia": dia,
-                    "via_drill": drill,
-                    "annular_ring": round((dia - drill) / 2, 4),
-                    "category": "via",
-                })
+            result.append({
+                "name": f"Custom D{dia:.2f}",
+                "via_dia": dia,
+                "via_drill": drill,
+                "annular_ring": round((dia - drill) / 2, 4),
+                "category": "via",
+            })
         return result
 
     # ------------------------------------------------------------------
