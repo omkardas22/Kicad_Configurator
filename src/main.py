@@ -1,17 +1,19 @@
 """
 KiCad Constraint Configurator
 Author: KiCad Constraint Configurator Team
-Version: 2.0.0
+Version: 2.1.1
 
 Main application file. Provides a CustomTkinter GUI for:
   - Selecting an AI provider (Google Gemini, OpenAI, Anthropic, OpenRouter)
   - Entering a per-provider API key (stored in %APPDATA%/KiCadConfigurator/config.json)
   - Fetching available models from the provider with smart recommendations
   - Specifying a vendor URL (PCBWay, JLCPCB, etc.)
-  - Auto-generating project name from selected vendor
+  - Auto-generating project name from selected vendor (updates on every URL change)
   - Scraping vendor capability pages with requests + BeautifulSoup
   - Extracting PCB constraints via AI structured output / Pydantic
+  - Annular ring–aware via configuration generation
   - Column-based preset configuration (Signal/Power/Differential/Vias) with 10 tiers
+  - Custom track / via sizes with manufacturer compatibility checking
   - Injecting extracted constraints into .kicad_pro (JSON) and .kicad_pcb (S-expression)
   - KiCad 9/10 compatible output (version 20260206)
 """
@@ -61,7 +63,7 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 APP_NAME    = "KiCad Constraint Configurator"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 APPDATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "KiCadConfigurator"
 CONFIG_FILE = APPDATA_DIR / "config.json"
 
@@ -315,6 +317,51 @@ def _validate_url(url: str) -> bool:
         return result.scheme in ("http", "https") and bool(result.hostname)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Custom size compatibility checking
+# ---------------------------------------------------------------------------
+def check_track_compatibility(width_mm: float, c: PCBConstraints) -> tuple[bool, str]:
+    """Check if a custom track width is compatible with vendor constraints.
+
+    Returns (is_compatible, reason_string).
+    """
+    if c is None:
+        return False, "No constraints loaded"
+    if width_mm <= 0:
+        return False, "Width must be > 0"
+    if width_mm < c.min_trace_width_mm:
+        return False, f"Below min ({c.min_trace_width_mm:.3f} mm)"
+    if width_mm > c.max_trace_width_mm:
+        return False, f"Above max ({c.max_trace_width_mm:.3f} mm)"
+    return True, "Compatible"
+
+
+def check_via_compatibility(dia_mm: float, drill_mm: float,
+                            c: PCBConstraints) -> tuple[bool, str]:
+    """Check if a custom via size is compatible with vendor constraints.
+
+    Returns (is_compatible, reason_string).
+    """
+    if c is None:
+        return False, "No constraints loaded"
+    if dia_mm <= 0 or drill_mm <= 0:
+        return False, "Values must be > 0"
+    if drill_mm >= dia_mm:
+        return False, "Drill must be < diameter"
+    if dia_mm < c.min_via_diameter_mm:
+        return False, f"Dia below min ({c.min_via_diameter_mm:.3f} mm)"
+    if dia_mm > c.max_via_diameter_mm:
+        return False, f"Dia above max ({c.max_via_diameter_mm:.3f} mm)"
+    if drill_mm < c.min_via_drill_mm:
+        return False, f"Drill below min ({c.min_via_drill_mm:.3f} mm)"
+    if drill_mm > c.max_via_drill_mm:
+        return False, f"Drill above max ({c.max_via_drill_mm:.3f} mm)"
+    annular_ring = (dia_mm - drill_mm) / 2
+    if annular_ring < c.min_annular_ring_mm:
+        return False, f"AR {annular_ring:.3f} < min {c.min_annular_ring_mm:.3f} mm"
+    return True, f"Compatible (AR: {annular_ring:.3f} mm)"
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +637,9 @@ EXTRACT_FN = {
     "openrouter": extract_constraints_openrouter,
 }
 
+APP_NAME = "KiCad Constraint Configurator"
+APP_VERSION = "2.1.1"
+
 
 # ---------------------------------------------------------------------------
 # Preset Generation (10 tiers per category)
@@ -657,33 +707,65 @@ def generate_diff_pair_presets(c: PCBConstraints) -> list[dict]:
 
 
 def generate_via_presets(c: PCBConstraints) -> list[dict]:
-    """Generate 10 via size presets from min to max diameter/drill."""
-    mn_d = max(c.min_via_diameter_mm, 0.2)
-    mx_d = max(min(c.max_via_diameter_mm, 6.0), mn_d * 2)
-    diameters = _linspace(mn_d, mx_d, 10)
-
+    """Generate 10 via size presets ensuring annular ring compliance.
+    First 3 configurations match min AR closely.
+    Matches against standard via sizes (diameter, drill).
+    """
+    min_ar = max(c.min_annular_ring_mm, 0.05)
     mn_dr = max(c.min_via_drill_mm, 0.1)
     mx_dr = max(min(c.max_via_drill_mm, 6.0), mn_dr * 2)
-    drills = _linspace(mn_dr, mx_dr, 10)
+    mx_d = max(min(c.max_via_diameter_mm, 6.0), min_ar * 2 + mn_dr * 2)
 
-    # Ensure drill < diameter for each pair while preserving monotonic order
-    for i in range(len(drills)):
-        if drills[i] >= diameters[i]:
-            drills[i] = round(diameters[i] * 0.55, 4)
+    STANDARD_VIAS = [
+        (0.4, 0.2), (0.45, 0.2), (0.5, 0.2), (0.5, 0.25), (0.6, 0.25), (0.6, 0.3),
+        (0.7, 0.3), (0.8, 0.4), (0.9, 0.4), (1.0, 0.5), (1.2, 0.6), (1.4, 0.7),
+        (1.6, 0.8), (2.0, 1.0), (2.5, 1.2), (3.0, 1.5)
+    ]
 
     names = [
         "Micro", "Ultra Fine", "Fine", "Small", "Standard",
         "Medium", "Large", "Heavy", "Extra Heavy", "Maximum",
     ]
-    return [
-        {
+
+    presets = []
+    
+    for i in range(10):
+        if i < 3:
+            target_dr = mn_dr + i * 0.05
+        else:
+            target_dr = mn_dr + 0.15 + (i - 2) * ((mx_dr - mn_dr) / 8)
+        
+        target_dr = min(max(target_dr, mn_dr), mx_dr)
+        target_ar = min_ar if i < 3 else min_ar + (i - 2) * 0.05
+        target_dia = min(target_dr + 2 * target_ar, mx_d)
+        
+        best_std = None
+        best_score = float('inf')
+        for (sd, sdr) in STANDARD_VIAS:
+            ar = (sd - sdr) / 2
+            if ar >= min_ar and sdr >= mn_dr and sd <= mx_d and sdr <= mx_dr:
+                score = abs(sdr - target_dr) * 2 + abs(sd - target_dia)
+                if score < best_score:
+                    best_score = score
+                    best_std = (sd, sdr)
+        
+        if best_std and best_score < 0.3:
+            d, dr = best_std
+        else:
+            d = round(target_dia, 4)
+            dr = round(target_dr, 4)
+            if (d - dr) / 2 < min_ar:
+                d = round(dr + 2 * min_ar, 4)
+
+        presets.append({
             "name": f"Via {names[i]}",
             "via_dia": d,
             "via_drill": dr,
+            "annular_ring": round((d - dr) / 2, 4),
             "category": "via",
-        }
-        for i, (d, dr) in enumerate(zip(diameters, drills))
-    ]
+        })
+    
+    return presets
 
 
 # ---------------------------------------------------------------------------
@@ -935,6 +1017,21 @@ def _verify_output(pro_path: Path, pcb_path: Path, log_callback) -> None:
         assert "rules" in design, "Missing 'rules' in design_settings"
         assert "track_widths" in design, "Missing 'track_widths'"
         assert "via_dimensions" in design, "Missing 'via_dimensions'"
+
+        # Verify annular ring compliance in via dimensions
+        min_ar = data["board"]["design_settings"]["rules"].get("min_via_annular_width", 0)
+        via_dims = design.get("via_dimensions", [])
+        for vd in via_dims:
+            d = vd.get("diameter", 0)
+            dr = vd.get("drill", 0)
+            if d > 0 and dr > 0:
+                ar = (d - dr) / 2
+                if ar < min_ar - 0.001:  # small tolerance for float rounding
+                    log_callback(
+                        f"  ⚠️ .kicad_pro: Via D={d:.3f} H={dr:.3f} "
+                        f"has AR={ar:.3f} < min {min_ar:.3f}"
+                    )
+
         log_callback("  ✅ .kicad_pro: Valid JSON, all required keys present")
     except json.JSONDecodeError as e:
         log_callback(f"  ❌ .kicad_pro: Invalid JSON — {e}")
@@ -1003,8 +1100,20 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._diff_vars:   list[ctk.BooleanVar] = []
         self._via_vars:    list[ctk.BooleanVar] = []
 
+        # URL-to-project-name tracking (for dynamic updates)
+        self._last_url_for_name: str = ""
+        self._url_trace_active: bool = False  # Prevent recursion
+
+        # Custom sizes storage
+        self._custom_tracks: list[float] = self._config.get("custom_tracks", [])
+        self._custom_vias: list[list[float]] = self._config.get("custom_vias", [])
+        # Widget references for custom sizes (rebuilt on changes)
+        self._custom_track_widgets: list = []
+        self._custom_via_widgets: list = []
+
         self._build_ui()
         self._restore_config()
+        self._bind_shortcuts()
 
         # Handle window close gracefully
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1021,6 +1130,17 @@ class KiCadConfiguratorApp(ctk.CTk):
                 self.after(ms, func)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Keyboard Shortcuts
+    # ------------------------------------------------------------------
+
+    def _bind_shortcuts(self) -> None:
+        """Bind keyboard shortcuts for common actions."""
+        self.bind("<Control-s>", lambda e: self._save_api_key())
+        self.bind("<Control-e>", lambda e: self._start_scrape())
+        self.bind("<Control-i>", lambda e: self._inject_constraints())
+        self.bind("<Control-l>", lambda e: self._export_log())
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -1046,17 +1166,28 @@ class KiCadConfiguratorApp(ctk.CTk):
             text_color=CLR_SUBTEXT,
         ).pack(side="left", pady=12)
 
-        # ── Main content area ──────────────────────────────────────────
+        # Shortcut hints on the right
+        ctk.CTkLabel(
+            title_frame,
+            text="Ctrl+E Extract  |  Ctrl+I Inject  |  Ctrl+L Export Log",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=CLR_BORDER,
+        ).pack(side="right", padx=24, pady=12)
+
+        # ── Main content area (grid layout for responsive resizing) ───
         content = ctk.CTkFrame(self, fg_color=CLR_BG)
         content.pack(fill="both", expand=True, padx=16, pady=12)
+        content.columnconfigure(0, weight=1, minsize=360)
+        content.columnconfigure(1, weight=2, minsize=480)
+        content.rowconfigure(0, weight=1)
 
         left = ctk.CTkScrollableFrame(
-            content, fg_color=CLR_PANEL, corner_radius=12, width=400
+            content, fg_color=CLR_PANEL, corner_radius=12
         )
-        left.pack(side="left", fill="y", padx=(0, 8))
+        left.grid(row=0, column=0, padx=(0, 8), sticky="nsew")
 
         right = ctk.CTkFrame(content, fg_color=CLR_PANEL, corner_radius=12)
-        right.pack(side="right", fill="both", expand=True)
+        right.grid(row=0, column=1, sticky="nsew")
 
         self._build_left_panel(left)
         self._build_right_panel(right)
@@ -1206,6 +1337,9 @@ class KiCadConfiguratorApp(ctk.CTk):
             fg_color=CLR_BG, border_color=CLR_BORDER, text_color=CLR_TEXT,
         ).pack(fill="x", padx=16, pady=(0, 4))
 
+        # Set up trace for dynamic project name updates
+        self._url_var.trace_add("write", self._on_url_change)
+
         quick_frame = ctk.CTkFrame(parent, fg_color="transparent")
         quick_frame.pack(fill="x", padx=16, pady=(0, 8))
         ctk.CTkLabel(
@@ -1295,11 +1429,13 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         self._tabs.add("📊 Results")
         self._tabs.add("📐 Presets")
+        self._tabs.add("⚙️ Custom")
         self._tabs.add("📋 Log")
         self._tabs.add("ℹ️ About")
 
         self._build_results_tab(self._tabs.tab("📊 Results"))
         self._build_presets_tab(self._tabs.tab("📐 Presets"))
+        self._build_custom_sizes_tab(self._tabs.tab("⚙️ Custom"))
         self._build_log_tab(self._tabs.tab("📋 Log"))
         self._build_about_tab(self._tabs.tab("ℹ️ About"))
 
@@ -1356,9 +1492,9 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._vendor_compat_badge.pack(side="right", padx=4)
 
         # ── Columns container ──────────────────────────────────────────
-        columns_frame = ctk.CTkFrame(self._presets_content, fg_color="transparent")
+        columns_frame = ctk.CTkScrollableFrame(self._presets_content, orientation="horizontal", fg_color="transparent")
         columns_frame.pack(fill="both", expand=True, padx=4, pady=4)
-        columns_frame.columnconfigure((0, 1, 2, 3), weight=1)
+        columns_frame.columnconfigure((0, 1, 2, 3), weight=1, minsize=220)
 
         # Build four columns
         self._signal_col_frame = self._build_preset_column(
@@ -1375,19 +1511,34 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         self._via_col_frame = self._build_preset_column(
             columns_frame, 3, "Vias", "⭕", CLR_VIA_COL,
-            "Via diameter / drill sizes"
+            "Via diameter / drill / AR"
         )
+
+        # ── Constraint summary footer ──────────────────────────────────
+        self._constraint_summary_frame = ctk.CTkFrame(
+            self._presets_content, fg_color=CLR_BG, corner_radius=8,
+            border_width=1, border_color=CLR_BORDER,
+        )
+        self._constraint_summary_frame.pack(fill="x", padx=8, pady=(8, 4))
+
+        self._constraint_summary_label = ctk.CTkLabel(
+            self._constraint_summary_frame,
+            text="📋  Constraint limits will appear here after extraction.",
+            font=ctk.CTkFont(family="Consolas", size=10),
+            text_color=CLR_SUBTEXT, anchor="w", justify="left",
+        )
+        self._constraint_summary_label.pack(padx=12, pady=8, anchor="w")
 
         # ── Info footer ────────────────────────────────────────────────
         info_frame = ctk.CTkFrame(
             self._presets_content, fg_color=CLR_PANEL, corner_radius=8,
             border_width=1, border_color=CLR_BORDER,
         )
-        info_frame.pack(fill="x", padx=8, pady=(8, 8))
+        info_frame.pack(fill="x", padx=8, pady=(4, 8))
         ctk.CTkLabel(
             info_frame,
             text="ℹ️  Each column has 10 configurations from minimum to maximum vendor capability.\n"
-                 "     Selected items will be injected as track/via/diff-pair size lists in your KiCad project.",
+                 "     Via configs are annular ring–verified. Selected items are injected into your KiCad project.",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=CLR_SUBTEXT, anchor="w", justify="left",
         ).pack(padx=12, pady=8, anchor="w")
@@ -1420,6 +1571,26 @@ class KiCadConfiguratorApp(ctk.CTk):
             text_color=CLR_SUBTEXT,
         ).pack(padx=12, pady=(0, 4), anchor="w")
 
+        # Select All / Deselect All buttons row
+        sel_row = ctk.CTkFrame(outer, fg_color="transparent")
+        sel_row.pack(fill="x", padx=6, pady=(4, 0))
+
+        ctk.CTkButton(
+            sel_row, text="All", width=40, height=22,
+            fg_color=CLR_BORDER, hover_color=CLR_ACCENT,
+            text_color=CLR_TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=9),
+            command=lambda o=outer: self._select_all_in_column(o, True),
+        ).pack(side="left", padx=(0, 2))
+
+        ctk.CTkButton(
+            sel_row, text="None", width=40, height=22,
+            fg_color=CLR_BORDER, hover_color=CLR_ACCENT,
+            text_color=CLR_TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=9),
+            command=lambda o=outer: self._select_all_in_column(o, False),
+        ).pack(side="left", padx=(0, 2))
+
         # Range label
         range_label = ctk.CTkLabel(
             outer, text="—",
@@ -1432,11 +1603,487 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         # Scrollable items area
         items_frame = ctk.CTkScrollableFrame(
-            outer, fg_color="transparent", height=400,
+            outer, fg_color="transparent", height=380,
         )
         items_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
         return items_frame
+
+    def _select_all_in_column(self, outer_frame: ctk.CTkFrame, select: bool) -> None:
+        """Select or deselect all checkboxes in a preset column."""
+        # Determine which vars list belongs to this column
+        items_frame = None
+        for child in outer_frame.winfo_children():
+            if isinstance(child, ctk.CTkScrollableFrame):
+                items_frame = child
+                break
+        if items_frame is None:
+            return
+
+        # Match column frame to vars list
+        var_lists = [
+            (self._signal_col_frame, self._signal_vars),
+            (self._power_col_frame,  self._power_vars),
+            (self._diff_col_frame,   self._diff_vars),
+            (self._via_col_frame,    self._via_vars),
+        ]
+        for frame, vars_list in var_lists:
+            if frame is items_frame:
+                for var in vars_list:
+                    var.set(select)
+                return
+
+    # ------------------------------------------------------------------
+    # Custom Sizes Tab
+    # ------------------------------------------------------------------
+
+    def _build_custom_sizes_tab(self, parent) -> None:
+        """Build the '⚙️ Custom' tab for entering custom track/via sizes."""
+        outer = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        outer.pack(fill="both", expand=True)
+
+        ctk.CTkLabel(
+            outer,
+            text="⚙️  Custom Track & Via Sizes",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            text_color=CLR_TEXT,
+        ).pack(padx=16, pady=(16, 4), anchor="w")
+
+        ctk.CTkLabel(
+            outer,
+            text="Add custom sizes and check compatibility with the loaded manufacturer constraints.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_SUBTEXT,
+        ).pack(padx=16, pady=(0, 12), anchor="w")
+
+        # ── Custom Track Width Section ──────────────────────────────────
+        track_section = ctk.CTkFrame(outer, fg_color=CLR_CARD, corner_radius=10,
+                                     border_width=1, border_color=CLR_BORDER)
+        track_section.pack(fill="x", padx=12, pady=(0, 12))
+
+        ctk.CTkLabel(
+            track_section,
+            text="📏  Custom Track Widths",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color=CLR_SIGNAL_COL,
+        ).pack(padx=16, pady=(12, 4), anchor="w")
+
+        track_input_row = ctk.CTkFrame(track_section, fg_color="transparent")
+        track_input_row.pack(fill="x", padx=16, pady=(4, 4))
+
+        ctk.CTkLabel(
+            track_input_row, text="Width (mm):",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT,
+        ).pack(side="left", padx=(0, 6))
+
+        self._custom_track_entry = ctk.CTkEntry(
+            track_input_row, width=100,
+            placeholder_text="e.g. 0.25",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=CLR_BG, border_color=CLR_BORDER, text_color=CLR_TEXT,
+        )
+        self._custom_track_entry.pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            track_input_row, text="+ Add Track", width=100,
+            fg_color=CLR_ACCENT, hover_color=CLR_ACCENT2,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._add_custom_track,
+        ).pack(side="left", padx=(0, 8))
+
+        self._custom_track_status = ctk.CTkLabel(
+            track_input_row, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_SUBTEXT,
+        )
+        self._custom_track_status.pack(side="left")
+
+        # Track list container
+        self._custom_track_list_frame = ctk.CTkFrame(
+            track_section, fg_color="transparent"
+        )
+        self._custom_track_list_frame.pack(fill="x", padx=16, pady=(4, 12))
+
+        # ── Custom Via Size Section ─────────────────────────────────────
+        via_section = ctk.CTkFrame(outer, fg_color=CLR_CARD, corner_radius=10,
+                                   border_width=1, border_color=CLR_BORDER)
+        via_section.pack(fill="x", padx=12, pady=(0, 12))
+
+        ctk.CTkLabel(
+            via_section,
+            text="⭕  Custom Via Sizes",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color=CLR_VIA_COL,
+        ).pack(padx=16, pady=(12, 4), anchor="w")
+
+        via_input_row1 = ctk.CTkFrame(via_section, fg_color="transparent")
+        via_input_row1.pack(fill="x", padx=16, pady=(4, 2))
+
+        ctk.CTkLabel(
+            via_input_row1, text="Diameter (mm):",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT,
+        ).pack(side="left", padx=(0, 6))
+
+        self._custom_via_dia_entry = ctk.CTkEntry(
+            via_input_row1, width=90,
+            placeholder_text="e.g. 0.6",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=CLR_BG, border_color=CLR_BORDER, text_color=CLR_TEXT,
+        )
+        self._custom_via_dia_entry.pack(side="left", padx=(0, 12))
+
+        ctk.CTkLabel(
+            via_input_row1, text="Drill (mm):",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT,
+        ).pack(side="left", padx=(0, 6))
+
+        self._custom_via_drill_entry = ctk.CTkEntry(
+            via_input_row1, width=90,
+            placeholder_text="e.g. 0.3",
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=CLR_BG, border_color=CLR_BORDER, text_color=CLR_TEXT,
+        )
+        self._custom_via_drill_entry.pack(side="left")
+
+        via_input_row2 = ctk.CTkFrame(via_section, fg_color="transparent")
+        via_input_row2.pack(fill="x", padx=16, pady=(2, 4))
+
+        self._custom_via_ar_label = ctk.CTkLabel(
+            via_input_row2, text="Annular Ring: —",
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color=CLR_SUBTEXT,
+        )
+        self._custom_via_ar_label.pack(side="left", padx=(0, 12))
+
+        ctk.CTkButton(
+            via_input_row2, text="+ Add Via", width=100,
+            fg_color=CLR_ACCENT, hover_color=CLR_ACCENT2,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._add_custom_via,
+        ).pack(side="left", padx=(0, 8))
+
+        self._custom_via_status = ctk.CTkLabel(
+            via_input_row2, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_SUBTEXT,
+        )
+        self._custom_via_status.pack(side="left")
+
+        # Live annular ring calculation as user types
+        self._custom_via_dia_entry.bind("<KeyRelease>", self._update_via_ar_preview)
+        self._custom_via_drill_entry.bind("<KeyRelease>", self._update_via_ar_preview)
+
+        # Via list container
+        self._custom_via_list_frame = ctk.CTkFrame(
+            via_section, fg_color="transparent"
+        )
+        self._custom_via_list_frame.pack(fill="x", padx=16, pady=(4, 12))
+
+        # ── Info ────────────────────────────────────────────────────────
+        info_frame = ctk.CTkFrame(outer, fg_color=CLR_PANEL, corner_radius=8,
+                                  border_width=1, border_color=CLR_BORDER)
+        info_frame.pack(fill="x", padx=12, pady=(4, 12))
+        ctk.CTkLabel(
+            info_frame,
+            text="ℹ️  Compatible custom sizes are automatically included during injection.\n"
+                 "     Incompatible entries are shown with ❌ and will be skipped.\n"
+                 "     Custom sizes are saved and persist across sessions.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_SUBTEXT, anchor="w", justify="left",
+        ).pack(padx=12, pady=8, anchor="w")
+
+        # Render any previously saved custom sizes
+        self._render_custom_tracks()
+        self._render_custom_vias()
+
+    def _update_via_ar_preview(self, event=None) -> None:
+        """Live-update the annular ring display as user types diameter/drill."""
+        try:
+            dia = float(self._custom_via_dia_entry.get().strip())
+            drill = float(self._custom_via_drill_entry.get().strip())
+            if drill >= dia or dia <= 0 or drill <= 0:
+                self._custom_via_ar_label.configure(
+                    text="Annular Ring: ⚠️ Invalid", text_color=CLR_ERROR
+                )
+                return
+            ar = (dia - drill) / 2
+            # Check against constraints if available
+            with self._constraints_lock:
+                c = self._constraints
+            if c and ar < c.min_annular_ring_mm:
+                self._custom_via_ar_label.configure(
+                    text=f"Annular Ring: {ar:.3f} mm ❌ (min: {c.min_annular_ring_mm:.3f})",
+                    text_color=CLR_ERROR,
+                )
+            elif c:
+                self._custom_via_ar_label.configure(
+                    text=f"Annular Ring: {ar:.3f} mm ✅",
+                    text_color=CLR_SUCCESS,
+                )
+            else:
+                self._custom_via_ar_label.configure(
+                    text=f"Annular Ring: {ar:.3f} mm (no constraints loaded)",
+                    text_color=CLR_WARNING,
+                )
+        except (ValueError, TypeError):
+            self._custom_via_ar_label.configure(
+                text="Annular Ring: —", text_color=CLR_SUBTEXT
+            )
+
+    def _add_custom_track(self) -> None:
+        """Add a custom track width from the entry field."""
+        try:
+            width = float(self._custom_track_entry.get().strip())
+        except (ValueError, TypeError):
+            self._custom_track_status.configure(
+                text="⚠️ Enter a valid number", text_color=CLR_WARNING
+            )
+            return
+        if width <= 0:
+            self._custom_track_status.configure(
+                text="⚠️ Width must be > 0", text_color=CLR_WARNING
+            )
+            return
+        # Check for duplicates
+        if width in self._custom_tracks:
+            self._custom_track_status.configure(
+                text="⚠️ Already added", text_color=CLR_WARNING
+            )
+            return
+        self._custom_tracks.append(width)
+        self._save_custom_sizes()
+        self._render_custom_tracks()
+        
+        # Inject into preset tabs if constraints are loaded
+        if self._constraints:
+            self._signal_presets.append({"name": f"Custom {width}mm", "track_width": width, "category": "signal", "is_manual": True})
+            self._power_presets.append({"name": f"Custom {width}mm", "track_width": width, "category": "power", "is_manual": True})
+            
+            # Re-render keeping existing selections
+            sig_sel = {i for i, var in enumerate(self._signal_vars) if var.get()} | {len(self._signal_presets)-1}
+            pwr_sel = {i for i, var in enumerate(self._power_vars) if var.get()} | {len(self._power_presets)-1}
+            
+            self._signal_vars = self._render_column(
+                self._signal_col_frame, self._signal_presets,
+                value_fmt=lambda p: f"{p['track_width']:.3f} mm",
+                default_indices=sig_sel,
+            )
+            self._power_vars = self._render_column(
+                self._power_col_frame, self._power_presets,
+                value_fmt=lambda p: f"{p['track_width']:.3f} mm",
+                default_indices=pwr_sel,
+            )
+            
+        self._custom_track_entry.delete(0, "end")
+        self._custom_track_status.configure(
+            text=f"✅ Added {width:.3f} mm", text_color=CLR_SUCCESS
+        )
+
+    def _remove_custom_track(self, width: float) -> None:
+        """Remove a custom track width."""
+        if width in self._custom_tracks:
+            self._custom_tracks.remove(width)
+            self._save_custom_sizes()
+            self._render_custom_tracks()
+
+    def _render_custom_tracks(self) -> None:
+        """Render the list of custom track widths with compatibility status."""
+        for w in self._custom_track_list_frame.winfo_children():
+            w.destroy()
+
+        if not self._custom_tracks:
+            ctk.CTkLabel(
+                self._custom_track_list_frame,
+                text="No custom track widths added.",
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color=CLR_SUBTEXT,
+            ).pack(padx=4, pady=4)
+            return
+
+        with self._constraints_lock:
+            c = self._constraints
+
+        for width in sorted(self._custom_tracks):
+            row = ctk.CTkFrame(self._custom_track_list_frame, fg_color=CLR_BG,
+                               corner_radius=6)
+            row.pack(fill="x", pady=2)
+
+            # Value
+            ctk.CTkLabel(
+                row, text=f"{width:.4f} mm",
+                font=ctk.CTkFont(family="Consolas", size=11),
+                text_color=CLR_ACCENT2,
+            ).pack(side="left", padx=8, pady=4)
+
+            # Compatibility status
+            if c:
+                ok, reason = check_track_compatibility(width, c)
+                status_text = f"✅ {reason}" if ok else f"❌ {reason}"
+                status_color = CLR_SUCCESS if ok else CLR_ERROR
+            else:
+                status_text = "— No constraints"
+                status_color = CLR_SUBTEXT
+
+            ctk.CTkLabel(
+                row, text=status_text,
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color=status_color,
+            ).pack(side="left", padx=4, pady=4)
+
+            # Delete button
+            ctk.CTkButton(
+                row, text="✕", width=28, height=24,
+                fg_color=CLR_BORDER, hover_color=CLR_ERROR,
+                text_color=CLR_TEXT,
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                command=lambda w=width: self._remove_custom_track(w),
+            ).pack(side="right", padx=4, pady=2)
+
+    def _add_custom_via(self) -> None:
+        """Add a custom via size from the entry fields."""
+        try:
+            dia = float(self._custom_via_dia_entry.get().strip())
+            drill = float(self._custom_via_drill_entry.get().strip())
+        except (ValueError, TypeError):
+            self._custom_via_status.configure(
+                text="⚠️ Enter valid numbers", text_color=CLR_WARNING
+            )
+            return
+        if dia <= 0 or drill <= 0:
+            self._custom_via_status.configure(
+                text="⚠️ Values must be > 0", text_color=CLR_WARNING
+            )
+            return
+        if drill >= dia:
+            self._custom_via_status.configure(
+                text="⚠️ Drill must be < diameter", text_color=CLR_WARNING
+            )
+            return
+        # Check duplicates
+        for existing in self._custom_vias:
+            if abs(existing[0] - dia) < 0.0001 and abs(existing[1] - drill) < 0.0001:
+                self._custom_via_status.configure(
+                    text="⚠️ Already added", text_color=CLR_WARNING
+                )
+                return
+
+        self._custom_vias.append([dia, drill])
+        self._save_custom_sizes()
+        self._render_custom_vias()
+        self._custom_via_dia_entry.delete(0, "end")
+        self._custom_via_drill_entry.delete(0, "end")
+        ar = (dia - drill) / 2
+        self._custom_via_status.configure(
+            text=f"✅ Added D:{dia:.3f} H:{drill:.3f} AR:{ar:.3f}",
+            text_color=CLR_SUCCESS,
+        )
+        self._custom_via_ar_label.configure(text="Annular Ring: —", text_color=CLR_SUBTEXT)
+
+    def _remove_custom_via(self, dia: float, drill: float) -> None:
+        """Remove a custom via size."""
+        self._custom_vias = [
+            v for v in self._custom_vias
+            if not (abs(v[0] - dia) < 0.0001 and abs(v[1] - drill) < 0.0001)
+        ]
+        self._save_custom_sizes()
+        self._render_custom_vias()
+
+    def _render_custom_vias(self) -> None:
+        """Render the list of custom via sizes with compatibility status."""
+        for w in self._custom_via_list_frame.winfo_children():
+            w.destroy()
+
+        if not self._custom_vias:
+            ctk.CTkLabel(
+                self._custom_via_list_frame,
+                text="No custom via sizes added.",
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color=CLR_SUBTEXT,
+            ).pack(padx=4, pady=4)
+            return
+
+        with self._constraints_lock:
+            c = self._constraints
+
+        for via in sorted(self._custom_vias, key=lambda v: v[0]):
+            dia, drill = via[0], via[1]
+            ar = (dia - drill) / 2
+            row = ctk.CTkFrame(self._custom_via_list_frame, fg_color=CLR_BG,
+                               corner_radius=6)
+            row.pack(fill="x", pady=2)
+
+            # Value
+            ctk.CTkLabel(
+                row,
+                text=f"D:{dia:.3f}  H:{drill:.3f}  AR:{ar:.3f} mm",
+                font=ctk.CTkFont(family="Consolas", size=11),
+                text_color=CLR_ACCENT2,
+            ).pack(side="left", padx=8, pady=4)
+
+            # Compatibility status
+            if c:
+                ok, reason = check_via_compatibility(dia, drill, c)
+                status_text = f"✅ {reason}" if ok else f"❌ {reason}"
+                status_color = CLR_SUCCESS if ok else CLR_ERROR
+            else:
+                status_text = "— No constraints"
+                status_color = CLR_SUBTEXT
+
+            ctk.CTkLabel(
+                row, text=status_text,
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color=status_color,
+            ).pack(side="left", padx=4, pady=4)
+
+            # Delete button
+            ctk.CTkButton(
+                row, text="✕", width=28, height=24,
+                fg_color=CLR_BORDER, hover_color=CLR_ERROR,
+                text_color=CLR_TEXT,
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                command=lambda d=dia, dr=drill: self._remove_custom_via(d, dr),
+            ).pack(side="right", padx=4, pady=2)
+
+    def _save_custom_sizes(self) -> None:
+        """Persist custom track/via sizes to config."""
+        self._config["custom_tracks"] = self._custom_tracks[:]
+        self._config["custom_vias"] = [v[:] for v in self._custom_vias]
+        save_config(self._config)
+
+    def _get_compatible_custom_tracks(self) -> list[float]:
+        """Return custom track widths that pass compatibility check."""
+        with self._constraints_lock:
+            c = self._constraints
+        if c is None:
+            return []
+        return [w for w in self._custom_tracks if check_track_compatibility(w, c)[0]]
+
+    def _get_compatible_custom_vias(self) -> list[dict]:
+        """Return custom via sizes that pass compatibility check, as preset dicts."""
+        with self._constraints_lock:
+            c = self._constraints
+        if c is None:
+            return []
+        result = []
+        for via in self._custom_vias:
+            dia, drill = via[0], via[1]
+            ok, _ = check_via_compatibility(dia, drill, c)
+            if ok:
+                result.append({
+                    "name": f"Custom D{dia:.2f}",
+                    "via_dia": dia,
+                    "via_drill": drill,
+                    "annular_ring": round((dia - drill) / 2, 4),
+                    "category": "via",
+                })
+        return result
+
+    # ------------------------------------------------------------------
+    # Log Tab
+    # ------------------------------------------------------------------
 
     def _build_log_tab(self, parent) -> None:
         self._log_text = ctk.CTkTextbox(
@@ -1448,13 +2095,24 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._log_text.pack(fill="both", expand=True, padx=8, pady=8)
         self._log_text.configure(state="disabled")
 
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.pack(fill="x", padx=8, pady=(0, 8))
+
         ctk.CTkButton(
-            parent, text="Clear Log", width=100,
+            btn_row, text="📥 Export Log", width=110,
+            fg_color=CLR_ACCENT, hover_color=CLR_ACCENT2,
+            text_color=CLR_TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._export_log,
+        ).pack(side="right", padx=(4, 0))
+
+        ctk.CTkButton(
+            btn_row, text="Clear Log", width=100,
             fg_color="transparent", border_width=1, border_color=CLR_BORDER,
             hover_color=CLR_BORDER, text_color=CLR_SUBTEXT,
             font=ctk.CTkFont(family="Segoe UI", size=11),
             command=self._clear_log,
-        ).pack(side="right", padx=8, pady=(0, 8))
+        ).pack(side="right", padx=(0, 4))
 
     def _build_about_tab(self, parent) -> None:
         about_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")
@@ -1476,15 +2134,20 @@ class KiCadConfiguratorApp(ctk.CTk):
             "  • Smart model recommendations per provider\n"
             "  • Per-provider API key storage\n"
             "  • AI-powered constraint extraction (min & max)\n"
+            "  • Annular ring–aware via configuration ← NEW\n"
+            "  • Custom track / via sizes with compatibility check ← NEW\n"
+            "  • Dynamic project name from vendor URL ← NEW\n"
             "  • Column-based preset configuration (10 tiers each)\n"
             "  • Signal / Power / Differential / Via categories\n"
+            "  • Select All / Deselect All per category ← NEW\n"
             "  • Auto net-class config (Default / Power / Diff_Pair)\n"
-            "  • Auto project naming from vendor selection\n"
             "  • .kicad_pro JSON patching (design rules + net classes)\n"
             "  • .kicad_pcb validation (no duplicate fields)\n"
             "  • KiCad 9/10 format output (version 20260206)\n"
             "  • Post-injection verification\n"
-            "  • API keys stored securely in %APPDATA%\n\n"
+            "  • API keys stored securely in %APPDATA%\n"
+            "  • Keyboard shortcuts (Ctrl+E/I/S/L)\n"
+            "  • Log export\n\n"
             "Supported PCB Vendors:\n"
             "  • JLCPCB  •  PCBWay  •  OSH Park  •  AllPCB  •  NextPCB\n"
             "  • Any vendor with a capability page\n\n"
@@ -1609,16 +2272,34 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._generate_all_presets(c)
         self._render_all_presets(c)
 
+        # Refresh custom sizes compatibility display
+        self._render_custom_tracks()
+        self._render_custom_vias()
+
     # ------------------------------------------------------------------
     # Preset Generation & Rendering (Column-based)
     # ------------------------------------------------------------------
 
     def _generate_all_presets(self, c: PCBConstraints) -> None:
-        """Generate 10 presets for each category."""
+        """Generate 10 presets for each category and append custom sizes."""
         self._signal_presets = generate_signal_trace_presets(c)
         self._power_presets  = generate_power_trace_presets(c)
         self._diff_presets   = generate_diff_pair_presets(c)
         self._via_presets    = generate_via_presets(c)
+
+        for w in self._custom_tracks:
+            self._signal_presets.append({"name": f"Custom {w}mm", "track_width": w, "category": "signal", "is_manual": True})
+            self._power_presets.append({"name": f"Custom {w}mm", "track_width": w, "category": "power", "is_manual": True})
+
+        for v in self._custom_vias:
+            self._via_presets.append({
+                "name": f"Custom {v['dia']}/{v['drill']}mm",
+                "via_dia": v['dia'],
+                "via_drill": v['drill'],
+                "annular_ring": round((v['dia'] - v['drill']) / 2, 4),
+                "category": "via",
+                "is_manual": True
+            })
 
     def _render_all_presets(self, c: PCBConstraints) -> None:
         """Render all four columns of presets."""
@@ -1628,6 +2309,18 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         # Update vendor badge
         self._vendor_compat_badge.configure(text=f"  ✔ {c.vendor_name} Compatible  ")
+
+        # Update constraint summary footer
+        self._constraint_summary_label.configure(
+            text=(
+                f"📋  Vendor: {c.vendor_name}  |  "
+                f"Trace: {c.min_trace_width_mm:.3f}–{c.max_trace_width_mm:.3f} mm  |  "
+                f"Via Ø: {c.min_via_diameter_mm:.3f}–{c.max_via_diameter_mm:.3f} mm  |  "
+                f"Drill: {c.min_via_drill_mm:.3f}–{c.max_via_drill_mm:.3f} mm  |  "
+                f"Min AR: {c.min_annular_ring_mm:.3f} mm  |  "
+                f"Clearance: {c.min_clearance_mm:.3f} mm"
+            ),
+        )
 
         # Render each column
         self._signal_vars = self._render_column(
@@ -1660,10 +2353,13 @@ class KiCadConfiguratorApp(ctk.CTk):
             f"{self._diff_presets[0]['diff_width']:.3f} — {self._diff_presets[-1]['diff_width']:.3f} mm"
         )
 
+        # Vias now show annular ring
         self._via_vars = self._render_column(
             self._via_col_frame, self._via_presets,
             value_fmt=lambda p: f"D:{p['via_dia']:.3f} H:{p['via_drill']:.3f}",
             default_indices={0, 2, 4, 6, 9},
+            extra_fmt=lambda p: f"AR:{p.get('annular_ring', 0):.3f}",
+            ar_constraints=c,
         )
         self._update_range_label(
             self._via_col_frame,
@@ -1671,8 +2367,14 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
 
     def _render_column(self, col_frame: ctk.CTkScrollableFrame, presets: list[dict],
-                        value_fmt, default_indices: set[int]) -> list[ctk.BooleanVar]:
-        """Render 10 preset rows in a column frame. Returns the checkbox BooleanVars."""
+                        value_fmt, default_indices: set[int],
+                        extra_fmt=None,
+                        ar_constraints: PCBConstraints | None = None) -> list[ctk.BooleanVar]:
+        """Render 10 preset rows in a column frame. Returns the checkbox BooleanVars.
+
+        extra_fmt: optional callable to produce an extra label (used for annular ring).
+        ar_constraints: if provided, color-code the extra label based on annular ring.
+        """
         # Clear existing widgets
         for w in col_frame.winfo_children():
             w.destroy()
@@ -1710,14 +2412,41 @@ class KiCadConfiguratorApp(ctk.CTk):
                 text=value_fmt(preset),
                 font=ctk.CTkFont(family="Consolas", size=11),
                 text_color=CLR_ACCENT2, anchor="w",
-            ).pack(side="left", fill="x", expand=True)
+            ).pack(side="left", padx=(0, 2))
+
+            # Extra label (annular ring for vias)
+            if extra_fmt is not None:
+                ar_text = extra_fmt(preset)
+                # Color-code annular ring
+                ar_color = CLR_SUBTEXT
+                if ar_constraints is not None:
+                    ar_val = preset.get("annular_ring", 0)
+                    min_ar = ar_constraints.min_annular_ring_mm
+                    if ar_val >= min_ar * 2:
+                        ar_color = CLR_SUCCESS   # >= 2× min: green
+                    elif ar_val >= min_ar:
+                        ar_color = CLR_WARNING   # >= min: yellow
+                    else:
+                        ar_color = CLR_ERROR     # < min: red (shouldn't happen)
+
+                ctk.CTkLabel(
+                    row_frame,
+                    text=ar_text,
+                    font=ctk.CTkFont(family="Consolas", size=9),
+                    text_color=ar_color, anchor="w",
+                ).pack(side="left", padx=(2, 0))
 
             # Preset name (smaller)
+            name_text = preset["name"].split(" ", 1)[-1] if " " in preset["name"] else preset["name"]
+            is_manual = preset.get("is_manual", False)
+            if is_manual:
+                name_text = f"🟡 {name_text}"
+            
             ctk.CTkLabel(
                 row_frame,
-                text=preset["name"].split(" ", 1)[-1] if " " in preset["name"] else preset["name"],
+                text=name_text,
                 font=ctk.CTkFont(family="Segoe UI", size=9),
-                text_color=CLR_SUBTEXT, anchor="e",
+                text_color=CLR_WARNING if is_manual else CLR_SUBTEXT, anchor="e",
             ).pack(side="right", padx=(4, 2))
 
         return vars_list
@@ -1729,13 +2458,55 @@ class KiCadConfiguratorApp(ctk.CTk):
             parent._range_label.configure(text=f"Range: {text}")
 
     # ------------------------------------------------------------------
+    # URL change tracking (dynamic project name)
+    # ------------------------------------------------------------------
+
+    def _on_url_change(self, *args) -> None:
+        """Callback triggered whenever the URL entry changes.
+
+        Updates the project name dynamically if the current name was
+        auto-generated from the previous URL (or is the default).
+        """
+        if self._url_trace_active:
+            return  # Prevent recursion
+        self._url_trace_active = True
+        try:
+            url = self._url_var.get().strip()
+            if not url or not _validate_url(url):
+                return
+
+            current_name = self._project_name_var.get().strip()
+            old_auto_name = (
+                _derive_project_name(self._last_url_for_name)
+                if self._last_url_for_name else ""
+            )
+
+            # Update if: name is default, empty, or matches the old auto-generated name
+            if (not current_name
+                    or current_name == "MyPCBProject"
+                    or current_name == old_auto_name):
+                new_name = _derive_project_name(url)
+                self._project_name_var.set(new_name)
+
+            self._last_url_for_name = url
+        finally:
+            self._url_trace_active = False
+
+    # ------------------------------------------------------------------
     # Quick-fill vendor
     # ------------------------------------------------------------------
 
     def _quick_fill_vendor(self, url: str, vendor_name: str) -> None:
         """Set the vendor URL and auto-generate a project name."""
+        # Setting url_var triggers the _on_url_change callback which
+        # handles project name updates, so we just set the URL.
+        # But we also need to force the project name for quick-fill.
+        self._last_url_for_name = self._url_var.get().strip()  # save current before change
         self._url_var.set(url)
+        # Force project name to match vendor (the trace callback handles this,
+        # but we explicitly set it for quick-fill to be predictable)
         self._project_name_var.set(f"{vendor_name}_Project")
+        self._last_url_for_name = url
 
     # ------------------------------------------------------------------
     # Provider / Model helpers
@@ -1969,6 +2740,26 @@ class KiCadConfiguratorApp(ctk.CTk):
         self._log_text.delete("1.0", "end")
         self._log_text.configure(state="disabled")
 
+    def _export_log(self) -> None:
+        """Export the log content to a text file."""
+        log_content = self._log_text.get("1.0", "end").strip()
+        if not log_content:
+            messagebox.showinfo("Export Log", "Log is empty — nothing to export.")
+            return
+        file_path = filedialog.asksaveasfilename(
+            title="Export Log",
+            defaultextension=".txt",
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+            initialfile=f"kicad_config_log_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+        )
+        if file_path:
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(log_content)
+                messagebox.showinfo("Export Log", f"Log exported to:\n{file_path}")
+            except Exception as e:
+                messagebox.showerror("Export Failed", f"Could not export log:\n{e}")
+
     def _set_status(self, msg: str) -> None:
         self._safe_after(0, lambda: self._status_var.set(msg))
 
@@ -2016,10 +2807,16 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         pid = self._current_provider_id()
 
-        # Auto-generate project name from URL if still default
+        # Always update project name from URL (dynamic naming)
+        new_name = _derive_project_name(url)
         current_name = self._project_name_var.get().strip()
-        if current_name == "MyPCBProject" or not current_name:
-            self._project_name_var.set(_derive_project_name(url))
+        old_auto_name = (
+            _derive_project_name(self._last_url_for_name)
+            if self._last_url_for_name else ""
+        )
+        if not current_name or current_name == "MyPCBProject" or current_name == old_auto_name:
+            self._project_name_var.set(new_name)
+        self._last_url_for_name = url
 
         self._scraping = True
         self._scrape_btn.configure(state="disabled", text="⏳  Working …")
@@ -2070,6 +2867,17 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._log(f"  🔩 Max Via Drill:   {constraints.max_via_drill_mm} mm")
             if constraints.notes:
                 self._log(f"  📝 Notes: {constraints.notes[:200]}")
+
+            # Log annular ring verification for generated vias
+            self._log("  🔘 Via annular ring verification:")
+            via_presets = generate_via_presets(constraints)
+            for vp in via_presets:
+                ar = vp["annular_ring"]
+                status = "✅" if ar >= constraints.min_annular_ring_mm else "❌"
+                self._log(
+                    f"     {status} {vp['name']}: D={vp['via_dia']:.3f} "
+                    f"H={vp['via_drill']:.3f} AR={ar:.3f} mm"
+                )
 
             # Save the used provider/model to config
             self._config["ai_provider"] = provider_id
@@ -2139,6 +2947,33 @@ class KiCadConfiguratorApp(ctk.CTk):
             self._via_presets[i] for i, var in enumerate(self._via_vars) if var.get()
         ] if self._via_vars else None
 
+        # ── Merge compatible custom sizes ─────────────────────────────
+        custom_tracks = self._get_compatible_custom_tracks()
+        if custom_tracks:
+            if selected_signals is None:
+                selected_signals = []
+            for w in custom_tracks:
+                # Add as signal-category track preset (avoids duplicates)
+                if not any(abs(p["track_width"] - w) < 0.0001 for p in selected_signals):
+                    selected_signals.append({
+                        "name": f"Custom {w:.3f}",
+                        "track_width": w,
+                        "category": "signal",
+                    })
+
+        custom_vias = self._get_compatible_custom_vias()
+        if custom_vias:
+            if selected_vias is None:
+                selected_vias = []
+            for cv in custom_vias:
+                # Avoid duplicates
+                if not any(
+                    abs(p["via_dia"] - cv["via_dia"]) < 0.0001
+                    and abs(p["via_drill"] - cv["via_drill"]) < 0.0001
+                    for p in selected_vias
+                ):
+                    selected_vias.append(cv)
+
         total_selected = sum(len(s) for s in [
             selected_signals or [], selected_power or [],
             selected_diff or [], selected_vias or []
@@ -2148,7 +2983,8 @@ class KiCadConfiguratorApp(ctk.CTk):
             messagebox.showwarning(
                 "No Presets Selected",
                 "Please select at least one preset in the\n"
-                "'📐 Presets' tab before injecting.",
+                "'📐 Presets' tab before injecting, or add\n"
+                "compatible custom sizes in the '⚙️ Custom' tab.",
             )
             return
 
@@ -2163,10 +2999,19 @@ class KiCadConfiguratorApp(ctk.CTk):
             )
             return
 
+        # Count custom sizes for logging
+        n_custom_tracks = len(custom_tracks)
+        n_custom_vias = len(custom_vias)
+
         self._inject_btn.configure(state="disabled", text="⏳  Injecting …")
         self._log(f"{'─'*50}")
         self._log(f"💉 Injection started at {time.strftime('%H:%M:%S')}")
         self._log(f"  📐 {total_selected} presets selected across all categories")
+        if n_custom_tracks or n_custom_vias:
+            self._log(
+                f"  ⚙️  Including {n_custom_tracks} custom track(s) "
+                f"and {n_custom_vias} custom via(s)"
+            )
 
         def _worker():
             try:
