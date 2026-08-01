@@ -1644,16 +1644,13 @@ class KiCadConfiguratorApp(ctk.CTk):
         )
         items_frame.pack(fill="both", expand=True)
 
+        outer._items_frame = items_frame  # Store reference for the All/None buttons
         return items_frame
 
     def _select_all_in_column(self, outer_frame: ctk.CTkFrame, select: bool) -> None:
         """Select or deselect all checkboxes in a preset column."""
         # Determine which vars list belongs to this column
-        items_frame = None
-        for child in outer_frame.winfo_children():
-            if isinstance(child, ctk.CTkScrollableFrame):
-                items_frame = child
-                break
+        items_frame = getattr(outer_frame, "_items_frame", None)
         if items_frame is None:
             return
 
