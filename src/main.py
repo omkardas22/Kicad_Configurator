@@ -3319,7 +3319,7 @@ class KiCadConfiguratorApp(ctk.CTk):
         except Exception as exc:
             self._log(f"❌ Error: {exc}")
             self._set_status(f"Error: {exc}")
-            self._safe_after(0, lambda: messagebox.showerror("Extraction Failed", str(exc)))
+            self._safe_after(0, lambda e=exc: messagebox.showerror("Extraction Failed", str(e)))
 
         finally:
             self._scraping = False
@@ -3436,7 +3436,7 @@ class KiCadConfiguratorApp(ctk.CTk):
             except Exception as exc:
                 self._log(f"❌ Injection failed: {exc}")
                 self._set_status(f"Error: {exc}")
-                self._safe_after(0, lambda: messagebox.showerror("Injection Failed", str(exc)))
+                self._safe_after(0, lambda e=exc: messagebox.showerror("Injection Failed", str(e)))
             finally:
                 self._safe_after(0, lambda: self._inject_btn.configure(
                     state="normal", text="💉  Inject into KiCad Files"
