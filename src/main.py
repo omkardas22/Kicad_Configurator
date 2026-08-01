@@ -63,7 +63,7 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 APP_NAME    = "KiCad Constraint Configurator"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 APPDATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "KiCadConfigurator"
 CONFIG_FILE = APPDATA_DIR / "config.json"
 
@@ -2293,10 +2293,10 @@ class KiCadConfiguratorApp(ctk.CTk):
 
         for v in self._custom_vias:
             self._via_presets.append({
-                "name": f"Custom {v['dia']}/{v['drill']}mm",
-                "via_dia": v['dia'],
-                "via_drill": v['drill'],
-                "annular_ring": round((v['dia'] - v['drill']) / 2, 4),
+                "name": f"Custom {v[0]}/{v[1]}mm",
+                "via_dia": v[0],
+                "via_drill": v[1],
+                "annular_ring": round((v[0] - v[1]) / 2, 4),
                 "category": "via",
                 "is_manual": True
             })
